@@ -228,6 +228,12 @@ func setupRouter() *gin.Engine {
 		protected.POST("/device/send-wol/:mac-addr", handleSendWOLMagicPacket)
 
 		protected.GET("/diagnostics", handleDiagnosticsDownload)
+
+		// Local JSON-RPC over HTTP: the same handler table the WebRTC data
+		// channel exposes, reachable without establishing a WebRTC session.
+		// A LAN client (e.g. nana) can drive the device without taking over
+		// the interactive session.
+		protected.POST("/jsonrpc", handleJSONRPCHttp)
 	}
 
 	// Catch-all route for SPA
@@ -478,6 +484,23 @@ func handleWebRTCSignalWsMessages(
 				l.Warn().Str("error", err.Error()).Msg("error starting new session")
 				continue
 			}
+		} else if message.Type == "jsonrpc" {
+			// JSON-RPC delivered over the signaling WebSocket, not the WebRTC
+			// data channel. This lets the cloud (or any signaling peer) drive
+			// device RPC — power, virtual media, keyboard input — without
+			// opening a WebRTC session, so automation never displaces an
+			// interactive operator's session. Dispatched in a goroutine so a
+			// long-running handler (e.g. a keyboard macro) does not stall the
+			// signaling read loop or its ping/pong.
+			data := message.Data
+			go func() {
+				response := processJSONRPCRequest(data)
+				writeCtx, cancel := context.WithTimeout(runCtx, WebsocketPingInterval)
+				defer cancel()
+				if err := wsjson.Write(writeCtx, wsCon, gin.H{"type": "jsonrpc", "data": response}); err != nil {
+					l.Warn().Str("error", err.Error()).Msg("failed to write JSONRPC response over websocket")
+				}
+			}()
 		} else if message.Type == "new-ice-candidate" {
 			l.Info().Str("data", string(message.Data)).Msg("The client sent us a new ICE candidate")
 			var candidate webrtc.ICECandidateInit
@@ -506,6 +529,21 @@ func handleWebRTCSignalWsMessages(
 			}
 		}
 	}
+}
+
+// handleJSONRPCHttp dispatches a single JSON-RPC 2.0 request received over
+// local HTTP and returns the response. Transport errors surface as HTTP status
+// codes; JSON-RPC-level errors are carried in the response body, matching
+// JSON-RPC-over-HTTP convention. Authentication is enforced by the protected
+// route group's middleware.
+func handleJSONRPCHttp(c *gin.Context) {
+	body, err := c.GetRawData()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
+		return
+	}
+
+	c.JSON(http.StatusOK, processJSONRPCRequest(body))
 }
 
 func handleLogin(c *gin.Context) {

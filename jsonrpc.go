@@ -100,15 +100,23 @@ func writeJSONRPCEvent(event string, params any, session *Session) {
 }
 
 func onRPCMessage(message webrtc.DataChannelMessage, session *Session) {
+	writeJSONRPCResponse(processJSONRPCRequest(message.Data), session)
+}
+
+// processJSONRPCRequest parses a raw JSON-RPC request and dispatches it to the
+// matching handler, returning the response. It is transport-independent: the
+// WebRTC data channel (onRPCMessage), the cloud WebSocket, and the local HTTP
+// endpoint all funnel through here so every transport shares one dispatch path
+// and one handler table.
+func processJSONRPCRequest(data []byte) JSONRPCResponse {
 	var request JSONRPCRequest
-	err := json.Unmarshal(message.Data, &request)
-	if err != nil {
+	if err := json.Unmarshal(data, &request); err != nil {
 		jsonRpcLogger.Warn().
-			Str("data", string(message.Data)).
+			Str("data", string(data)).
 			Err(err).
 			Msg("Error unmarshalling JSONRPC request")
 
-		errorResponse := JSONRPCResponse{
+		return JSONRPCResponse{
 			JSONRPC: "2.0",
 			Error: map[string]any{
 				"code":    -32700,
@@ -116,10 +124,16 @@ func onRPCMessage(message webrtc.DataChannelMessage, session *Session) {
 			},
 			ID: 0,
 		}
-		writeJSONRPCResponse(errorResponse, session)
-		return
 	}
 
+	return dispatchJSONRPCRequest(request)
+}
+
+// dispatchJSONRPCRequest invokes the handler for a parsed request. It touches
+// no Session, so handlers run identically regardless of the transport that
+// delivered the request (handlers that report state to the interactive UI
+// already guard on currentSession != nil).
+func dispatchJSONRPCRequest(request JSONRPCRequest) JSONRPCResponse {
 	scopedLogger := jsonRpcLogger.With().
 		Str("method", request.Method).
 		Interface("params", request.Params).
@@ -130,7 +144,7 @@ func onRPCMessage(message webrtc.DataChannelMessage, session *Session) {
 
 	handler, ok := rpcHandlers[request.Method]
 	if !ok {
-		errorResponse := JSONRPCResponse{
+		return JSONRPCResponse{
 			JSONRPC: "2.0",
 			Error: map[string]any{
 				"code":    -32601,
@@ -138,14 +152,12 @@ func onRPCMessage(message webrtc.DataChannelMessage, session *Session) {
 			},
 			ID: request.ID,
 		}
-		writeJSONRPCResponse(errorResponse, session)
-		return
 	}
 
 	result, err := callRPCHandler(scopedLogger, handler, request.Params)
 	if err != nil {
 		scopedLogger.Error().Err(err).Msg("Error calling RPC handler")
-		errorResponse := JSONRPCResponse{
+		return JSONRPCResponse{
 			JSONRPC: "2.0",
 			Error: map[string]any{
 				"code":    -32603,
@@ -154,18 +166,15 @@ func onRPCMessage(message webrtc.DataChannelMessage, session *Session) {
 			},
 			ID: request.ID,
 		}
-		writeJSONRPCResponse(errorResponse, session)
-		return
 	}
 
 	scopedLogger.Trace().Dur("duration", time.Since(t)).Interface("result", result).Msg("RPC handler returned")
 
-	response := JSONRPCResponse{
+	return JSONRPCResponse{
 		JSONRPC: "2.0",
 		Result:  result,
 		ID:      request.ID,
 	}
-	writeJSONRPCResponse(response, session)
 }
 
 func rpcPing() (string, error) {

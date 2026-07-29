@@ -991,6 +991,12 @@ func updateUsbRelatedConfig() error {
 	// Reset recovery timer so auto-recovery doesn't interfere during
 	// the host's USB re-enumeration window after a deliberate config change.
 	setUSBRecoveryTimer(time.Now())
+	// Enabling the ethernet device creates usb0, but the kernel leaves it down
+	// and unaddressed. initUsbGadget() only covers the case where it was already
+	// enabled at boot, so the bring-up has to be re-run whenever the composition
+	// changes -- otherwise toggling it on in the UI yields a link the host can
+	// see but nothing can talk to.
+	go configureEthernetGadgetInterface()
 	if err := SaveConfig(); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
@@ -1021,8 +1027,8 @@ func rpcSetUsbDeviceState(device string, enabled bool) error {
 		config.UsbDevices.MassStorage = enabled
 	case "serialConsole":
 		config.UsbDevices.SerialConsole = enabled
-	case "ipmiKcs":
-		config.UsbDevices.IpmiKcs = enabled
+	case "ethernet":
+		config.UsbDevices.Ethernet = enabled
 	case "audio":
 		config.UsbDevices.Audio = enabled
 		if !enabled {

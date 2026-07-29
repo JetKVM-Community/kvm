@@ -24,17 +24,8 @@ import (
 	"github.com/psanford/httpreadat"
 )
 
-func writeFile(path string, data string) error {
-	return os.WriteFile(path, []byte(data), 0644)
-}
-
 func getMassStorageImage() (string, error) {
-	massStorageFunctionPath, err := gadget.GetPath("mass_storage_lun0")
-	if err != nil {
-		return "", fmt.Errorf("failed to get mass storage path: %w", err)
-	}
-
-	imagePath, err := os.ReadFile(path.Join(massStorageFunctionPath, "file"))
+	imagePath, err := gadget.ReadGadgetAttr("mass_storage_lun0", "file")
 	if err != nil {
 		return "", fmt.Errorf("failed to get mass storage image path: %w", err)
 	}
@@ -42,12 +33,7 @@ func getMassStorageImage() (string, error) {
 }
 
 func setMassStorageImage(imagePath string) error {
-	massStorageFunctionPath, err := gadget.GetPath("mass_storage_lun0")
-	if err != nil {
-		return fmt.Errorf("failed to get mass storage path: %w", err)
-	}
-
-	if err := writeFile(path.Join(massStorageFunctionPath, "file"), imagePath); err != nil {
+	if err := gadget.WriteGadgetAttr("mass_storage_lun0", "file", []byte(imagePath)); err != nil {
 		return fmt.Errorf("failed to set image path: %w", err)
 	}
 	return nil
@@ -183,11 +169,7 @@ func rpcMountBuiltInImage(filename string) error {
 }
 
 func getMassStorageCDROMEnabled() (bool, error) {
-	massStorageFunctionPath, err := gadget.GetPath("mass_storage_lun0")
-	if err != nil {
-		return false, fmt.Errorf("failed to get mass storage path: %w", err)
-	}
-	data, err := os.ReadFile(path.Join(massStorageFunctionPath, "cdrom"))
+	data, err := gadget.ReadGadgetAttr("mass_storage_lun0", "cdrom")
 	if err != nil {
 		return false, fmt.Errorf("failed to read cdrom mode: %w", err)
 	}

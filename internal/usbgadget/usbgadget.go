@@ -21,7 +21,7 @@ type Devices struct {
 	Keyboard      bool `json:"keyboard"`
 	MassStorage   bool `json:"mass_storage"`
 	SerialConsole bool `json:"serial_console"`
-	IpmiKcs       bool `json:"ipmi_kcs"`
+	Ethernet      bool `json:"ethernet"`
 	Audio         bool `json:"audio"`
 }
 

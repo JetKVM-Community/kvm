@@ -26,7 +26,7 @@ export interface UsbDeviceConfig {
   relative_mouse: boolean;
   mass_storage: boolean;
   serial_console: boolean;
-  ipmi_kcs: boolean;
+  ethernet: boolean;
   audio: boolean;
 }
 
@@ -36,7 +36,7 @@ const defaultUsbDeviceConfig: UsbDeviceConfig = {
   relative_mouse: true,
   mass_storage: true,
   serial_console: false,
-  ipmi_kcs: false,
+  ethernet: false,
   audio: true,
 };
 
@@ -50,7 +50,7 @@ const usbPresets = [
       relative_mouse: true,
       mass_storage: true,
       serial_console: false,
-      ipmi_kcs: false,
+      ethernet: false,
       audio: true,
     },
   },
@@ -63,7 +63,7 @@ const usbPresets = [
       relative_mouse: false,
       mass_storage: false,
       serial_console: false,
-      ipmi_kcs: false,
+      ethernet: false,
       audio: false,
     },
   },
@@ -261,12 +261,12 @@ export function UsbDeviceSetting() {
             </div>
             <div className="space-y-4">
               <SettingsItem
-                title={m.usb_device_enable_ipmi_kcs_title()}
-                description={m.usb_device_enable_ipmi_kcs_description()}
+                title={m.usb_device_enable_ethernet_title()}
+                description={m.usb_device_enable_ethernet_description()}
               >
                 <Checkbox
-                  checked={usbDeviceConfig.ipmi_kcs}
-                  onChange={onUsbConfigItemChange("ipmi_kcs")}
+                  checked={usbDeviceConfig.ethernet}
+                  onChange={onUsbConfigItemChange("ethernet")}
                 />
               </SettingsItem>
             </div>

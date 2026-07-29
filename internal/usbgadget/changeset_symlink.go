@@ -33,7 +33,7 @@ func checkIfSymlinksInOrder(fc *FileChange, logger *zerolog.Logger) (FileState, 
 		return FileStateUnknown, fmt.Errorf("no symlinks to check")
 	}
 
-	fi, err := os.Lstat(fc.Path)
+	fi, err := sysfsLstat(fc.Path)
 
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -48,7 +48,7 @@ func checkIfSymlinksInOrder(fc *FileChange, logger *zerolog.Logger) (FileState, 
 		return FileStateUnknown, fmt.Errorf("file is not a directory")
 	}
 
-	files, err := os.ReadDir(fc.Path)
+	files, err := sysfsReadDir(fc.Path)
 	symlinks := make([]symlink, 0)
 	if err != nil {
 		return FileStateUnknown, fmt.Errorf("failed to read directory")
@@ -60,7 +60,7 @@ func checkIfSymlinksInOrder(fc *FileChange, logger *zerolog.Logger) (FileState, 
 		}
 
 		path := filepath.Join(fc.Path, file.Name())
-		target, err := os.Readlink(path)
+		target, err := sysfsReadlink(path)
 		if err != nil {
 			return FileStateUnknown, fmt.Errorf("failed to read symlink")
 		}
@@ -95,7 +95,7 @@ func recreateSymlinks(fc *FileChange, logger *zerolog.Logger) error {
 		logger = defaultLogger
 	}
 	// remove all symlinks
-	files, err := os.ReadDir(fc.Path)
+	files, err := sysfsReadDir(fc.Path)
 	if err != nil {
 		return fmt.Errorf("failed to read directory")
 	}
@@ -108,7 +108,7 @@ func recreateSymlinks(fc *FileChange, logger *zerolog.Logger) error {
 			continue
 		}
 		l.Info().Str("name", file.Name()).Msg("remove symlink")
-		err := os.Remove(path.Join(fc.Path, file.Name()))
+		err := sysfsRemove(path.Join(fc.Path, file.Name()))
 		if err != nil {
 			return fmt.Errorf("failed to remove symlink")
 		}
@@ -125,7 +125,7 @@ func recreateSymlinks(fc *FileChange, logger *zerolog.Logger) error {
 			path = filepath.Join(fc.Path, path)
 		}
 
-		err := os.Symlink(symlink.Target, path)
+		err := sysfsSymlink(symlink.Target, path)
 		if err != nil {
 			l.Warn().Err(err).Msg("failed to create symlink")
 			return fmt.Errorf("failed to create symlink")

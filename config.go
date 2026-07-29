@@ -178,7 +178,22 @@ var (
 		Keyboard:      true,
 		MassStorage:   true,
 		Audio:         true,
-		IpmiKcs:       false,
+		// Ethernet (CDC-ECM) is opt-in, but NOT because it conflicts with
+		// anything: it changes what the attached host sees (an extra NIC), so
+		// it should be a deliberate choice.
+		//
+		// An earlier version of this comment claimed the ECM bulk-IN endpoint
+		// could not share the RV1106 dwc3 TxFIFO RAM with mass storage's, and
+		// that enabling both broke enumeration and the HID keyboard. That does
+		// not reproduce on the current firmware. Measured on hardware
+		// 2026-07-29 with ecm.usb0 + mass_storage.usb0 + 4x hid + uac1 bound
+		// simultaneously (9 USB interfaces, 8 IN endpoints of NUM_IN_EPS=10):
+		// the UDC reached "configured", the host bound cdc_ether and pinged
+		// over usb0 at 0.2-0.4 ms with no loss, "JetKVM Virtual Media" still
+		// attached as sr0, and the HID mice/keyboard still enumerated. dwc3
+		// reallocated the TxFIFOs on the fly (tx-fifo-resize is set in the DT),
+		// which is exactly what it is supposed to do.
+		Ethernet: false,
 	}
 )
 

@@ -197,7 +197,7 @@ func (fc *FileChange) checkIfDirIsMountPoint() error {
 func (fc *FileChange) getActualState() error {
 	l := defaultLogger.With().Str("path", fc.Path).Logger()
 
-	fi, err := os.Lstat(fc.Path)
+	fi, err := sysfsLstat(fc.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			fc.ActualState = FileStateAbsent
@@ -212,7 +212,7 @@ func (fc *FileChange) getActualState() error {
 	if fi.Mode()&os.ModeSymlink == os.ModeSymlink {
 		fc.ActualState = FileStateSymlink
 		// get the target of the symlink
-		target, err := os.Readlink(fc.Path)
+		target, err := sysfsReadlink(fc.Path)
 		if err != nil {
 			l.Warn().Err(err).Msg("failed to read symlink")
 			return fmt.Errorf("failed to read symlink")
@@ -260,7 +260,7 @@ func (fc *FileChange) getActualState() error {
 	if fi.Mode().IsRegular() {
 		fc.ActualState = FileStateFile
 		// get the content of the file
-		content, err := os.ReadFile(fc.Path)
+		content, err := sysfsReadFile(fc.Path)
 		if err != nil {
 			l.Warn().Err(err).Msg("failed to read file")
 			return fmt.Errorf("failed to read file")
@@ -400,28 +400,28 @@ func (c *ChangeSet) ApplyChanges() error {
 func (c *ChangeSet) applyChange(change *FileChange) error {
 	switch change.Action() {
 	case FileChangeResolvedActionWriteFile:
-		return os.WriteFile(change.Path, change.ExpectedContent, 0644)
+		return sysfsWriteFile(change.Path, change.ExpectedContent, 0644)
 	case FileChangeResolvedActionUpdateFile:
-		return os.WriteFile(change.Path, change.ExpectedContent, 0644)
+		return sysfsWriteFile(change.Path, change.ExpectedContent, 0644)
 	case FileChangeResolvedActionCreateFile:
-		return os.WriteFile(change.Path, change.ExpectedContent, 0644)
+		return sysfsWriteFile(change.Path, change.ExpectedContent, 0644)
 	case FileChangeResolvedActionCreateSymlink:
-		return os.Symlink(string(change.ExpectedContent), change.Path)
+		return sysfsSymlink(string(change.ExpectedContent), change.Path)
 	case FileChangeResolvedActionRecreateSymlink:
-		if err := os.Remove(change.Path); err != nil {
+		if err := sysfsRemove(change.Path); err != nil {
 			return fmt.Errorf("failed to remove symlink: %w", err)
 		}
-		return os.Symlink(string(change.ExpectedContent), change.Path)
+		return sysfsSymlink(string(change.ExpectedContent), change.Path)
 	case FileChangeResolvedActionReorderSymlinks:
 		return recreateSymlinks(change, nil)
 	case FileChangeResolvedActionCreateDirectory:
-		return os.MkdirAll(change.Path, 0755)
+		return sysfsMkdirAll(change.Path, 0755)
 	case FileChangeResolvedActionRemove:
-		return os.Remove(change.Path)
+		return sysfsRemove(change.Path)
 	case FileChangeResolvedActionRemoveDirectory:
-		return os.RemoveAll(change.Path)
+		return sysfsRemoveAll(change.Path)
 	case FileChangeResolvedActionTouch:
-		return os.Chtimes(change.Path, time.Now(), time.Now())
+		return sysfsChtimes(change.Path, time.Now(), time.Now())
 	case FileChangeResolvedActionMountConfigFS:
 		return mountConfigFS(change.Path)
 	case FileChangeResolvedActionDoNothing:

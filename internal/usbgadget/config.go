@@ -3,6 +3,7 @@ package usbgadget
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 )
 
 type gadgetConfigItem struct {
@@ -65,8 +66,8 @@ var defaultGadgetConfig = map[string]gadgetConfigItem{
 	"mass_storage_lun0": massStorageLun0Config,
 	// serial console (CDC-ACM)
 	"serial_console": serialConsoleConfig,
-	// IPMI over serial (a second CDC-ACM function; see ipmi_kcs.go)
-	"ipmi_kcs": ipmiKcsConfig,
+	// ethernet (CDC-ECM)
+	"ethernet": ethernetConfig,
 }
 
 func (u *UsbGadget) isGadgetConfigItemEnabled(itemKey string) bool {
@@ -83,8 +84,8 @@ func (u *UsbGadget) isGadgetConfigItemEnabled(itemKey string) bool {
 		return u.enabledDevices.MassStorage
 	case "serial_console":
 		return u.enabledDevices.SerialConsole
-	case "ipmi_kcs":
-		return u.enabledDevices.IpmiKcs
+	case "ethernet":
+		return u.enabledDevices.Ethernet
 	case "audio":
 		return u.enabledDevices.Audio
 	default:
@@ -145,6 +146,26 @@ func (u *UsbGadget) GetPath(itemKey string) (string, error) {
 		return "", fmt.Errorf("config item %s not found", itemKey)
 	}
 	return joinPath(u.kvmGadgetPath, item.path), nil
+}
+
+// ReadGadgetAttr reads an attribute file of a gadget config item through the
+// sysfs root.
+func (u *UsbGadget) ReadGadgetAttr(itemKey string, attr string) ([]byte, error) {
+	itemPath, err := u.GetPath(itemKey)
+	if err != nil {
+		return nil, err
+	}
+	return sysfsReadFile(filepath.Join(itemPath, attr))
+}
+
+// WriteGadgetAttr writes an attribute file of a gadget config item through the
+// sysfs root.
+func (u *UsbGadget) WriteGadgetAttr(itemKey string, attr string, value []byte) error {
+	itemPath, err := u.GetPath(itemKey)
+	if err != nil {
+		return err
+	}
+	return sysfsWriteFile(filepath.Join(itemPath, attr), value, 0644)
 }
 
 // OverrideGadgetConfig overrides the gadget config for the given item and attribute.

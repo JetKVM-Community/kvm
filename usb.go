@@ -6,15 +6,65 @@ import (
 	"time"
 
 	"github.com/jetkvm/kvm/internal/usbgadget"
+	"github.com/vishvananda/netlink"
 )
 
 var gadget *usbgadget.UsbGadget
 
-// The IPMI device is a CDC-ACM serial function (see
-// internal/usbgadget/ipmi_kcs.go), so there is nothing to configure on the
-// gadget side once it is bound: the kernel creates /dev/ttyGS1 directly. This
-// replaces the former CDC-ECM path, which needed usb0 brought up with a
-// link-local address before the host could reach the JetKVM.
+// The CDC-ECM function (internal/usbgadget/ethernet.go) needs work here: the
+// kernel creates a usb0 netdev on the gadget side, but leaves it down and
+// unaddressed.
+
+// USB CDC-ECM gadget interface. When the ethernet USB device is enabled the
+// kernel exposes a usb0 netdev on the gadget side; bring it up with a link-local
+// address so the attached host reaches the JetKVM over USB without any DHCP
+// server (the host's CDC-ECM NIC auto-configures via APIPA in the same /16).
+// This is done in the app (rather than a boot script) because usb0 only exists
+// once the app configures the gadget, and it must be re-asserted after any USB
+// re-enumeration/rebind.
+const ethernetGadgetInterface = "usb0"
+const ethernetGadgetAddress = "169.254.10.1/16"
+
+// configureEthernetGadgetInterface brings the usb0 CDC-ECM interface up with a
+// static address when the ethernet USB device is enabled. It is safe to call
+// repeatedly: the address is applied with AddrReplace and a missing interface
+// is retried briefly (the netdev appears shortly after the gadget is bound).
+func configureEthernetGadgetInterface() {
+	devices := effectiveUsbDevices()
+	if devices == nil || !devices.Ethernet {
+		return
+	}
+
+	var link netlink.Link
+	var err error
+	for i := 0; i < 20; i++ {
+		if link, err = netlink.LinkByName(ethernetGadgetInterface); err == nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if err != nil {
+		usbLogger.Warn().Err(err).Str("iface", ethernetGadgetInterface).Msg("usb ethernet interface not found; skipping IP config")
+		return
+	}
+
+	if err := netlink.LinkSetUp(link); err != nil {
+		usbLogger.Warn().Err(err).Str("iface", ethernetGadgetInterface).Msg("failed to bring up usb ethernet interface")
+		return
+	}
+
+	addr, err := netlink.ParseAddr(ethernetGadgetAddress)
+	if err != nil {
+		usbLogger.Error().Err(err).Str("addr", ethernetGadgetAddress).Msg("invalid usb ethernet address")
+		return
+	}
+	if err := netlink.AddrReplace(link, addr); err != nil {
+		usbLogger.Warn().Err(err).Str("iface", ethernetGadgetInterface).Str("addr", ethernetGadgetAddress).Msg("failed to set usb ethernet address")
+		return
+	}
+
+	usbLogger.Info().Str("iface", ethernetGadgetInterface).Str("addr", ethernetGadgetAddress).Msg("configured usb ethernet interface")
+}
 
 func effectiveUsbDevices() *usbgadget.Devices {
 	if config == nil || config.UsbDevices == nil {
@@ -35,6 +85,10 @@ func effectiveAudioEnabled() bool {
 // initUsbGadget initializes the USB gadget.
 // call it only after the config is loaded.
 func initUsbGadget() {
+	// Pin the CDC-ECM MACs to this unit before the gadget is built, so usb0's
+	// address survives reboots (see internal/usbgadget/ethernet.go).
+	usbgadget.SetEthernetMACSeed(GetDeviceID())
+
 	gadget = usbgadget.NewUsbGadget(
 		"jetkvm",
 		effectiveUsbDevices(),
@@ -68,6 +122,9 @@ func initUsbGadget() {
 	if err := gadget.OpenKeyboardHidFile(); err != nil {
 		usbLogger.Error().Err(err).Msg("failed to open keyboard hid file")
 	}
+
+	// bring up the usb0 CDC-ECM interface (retries until the netdev appears)
+	go configureEthernetGadgetInterface()
 }
 
 // rpcHidReport wraps a HID gadget call with the common guard (skip if USB not
@@ -201,6 +258,9 @@ func attemptUSBRecovery(state string) string {
 	// Clear stale /dev/hidg* handles from the pre-rebind gadget instance.
 	// The next write/open must use the newly recreated device nodes.
 	gadget.ResetHIDFiles()
+
+	// A rebind can recreate the usb0 netdev; re-assert its address.
+	go configureEthernetGadgetInterface()
 
 	// After rebind, the kernel recreates /dev/hidg* but the character
 	// devices take several seconds to become usable (ENXIO until the

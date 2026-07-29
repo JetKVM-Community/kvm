@@ -1,7 +1,9 @@
 package kvm
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -20,9 +22,43 @@ import (
 // etc.) that issue ComputerSystem.Reset.
 
 const (
-	redfishVersion  = "1.6.0"
-	redfishSystemID = "1"
+	redfishVersion   = "1.6.0"
+	redfishSystemID  = "1"
+	redfishManagerID = "bmc"
+	redfishChassisID = "1"
+
+	// The USB host interface (DSP0270) link. Requests arriving on this subnet
+	// come from the managed host over the point-to-point CDC-ECM link, which is
+	// the transport the Redfish Host Interface is defined on.
+	redfishHostInterfaceSubnet = "169.254.0.0/16"
 )
+
+// redfishUUID renders the device ID as an RFC 4122 UUID string. Redfish
+// requires ServiceRoot.UUID to be a real UUID, and EDK2's RedfishDiscoverDxe
+// compares it against the UUID in the SMBIOS type 42 protocol record -- a bare
+// device ID is rejected. The mapping is deterministic so firmware and BMC agree
+// without any exchange.
+func redfishUUID() string {
+	sum := sha256.Sum256([]byte("jetkvm/redfish-service-uuid/" + GetDeviceID()))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x50 // version 5 (name-based)
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// isRedfishHostInterfaceRequest reports whether a request arrived over the USB
+// host-interface link rather than the LAN.
+func isRedfishHostInterfaceRequest(c *gin.Context) bool {
+	ip := net.ParseIP(c.ClientIP())
+	if ip == nil {
+		return false
+	}
+	_, subnet, err := net.ParseCIDR(redfishHostInterfaceSubnet)
+	if err != nil {
+		return false
+	}
+	return subnet.Contains(ip)
+}
 
 // registerRedfishRoutes wires the Redfish endpoints onto the gin engine. The
 // unauthenticated protocol-version endpoint lives at /redfish; everything under
@@ -45,7 +81,121 @@ func registerRedfishRoutes(r *gin.Engine) {
 		v1.GET("/Systems", handleRedfishSystemsCollection)
 		v1.GET("/Systems/:id", handleRedfishSystem)
 		v1.POST("/Systems/:id/Actions/ComputerSystem.Reset", handleRedfishSystemReset)
+		v1.GET("/Managers", handleRedfishManagersCollection)
+		v1.GET("/Managers/:id", handleRedfishManager)
+		v1.GET("/Chassis", handleRedfishChassisCollection)
+		v1.GET("/Chassis/:id", handleRedfishChassis)
+		v1.GET("/SessionService", handleRedfishSessionService)
+		v1.GET("/SessionService/Sessions", handleRedfishSessions)
 	}
+}
+
+func handleRedfishManagersCollection(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"@odata.type":         "#ManagerCollection.ManagerCollection",
+		"@odata.id":           "/redfish/v1/Managers",
+		"Name":                "Manager Collection",
+		"Members@odata.count": 1,
+		"Members": []gin.H{
+			{"@odata.id": "/redfish/v1/Managers/" + redfishManagerID},
+		},
+	})
+}
+
+func handleRedfishManager(c *gin.Context) {
+	if c.Param("id") != redfishManagerID {
+		redfishError(c, http.StatusNotFound, "Manager not found")
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"@odata.type":     "#Manager.v1_5_0.Manager",
+		"@odata.id":       "/redfish/v1/Managers/" + redfishManagerID,
+		"Id":              redfishManagerID,
+		"Name":            "JetKVM BMC",
+		"ManagerType":     "BMC",
+		"UUID":            redfishUUID(),
+		"Model":           "JetKVM",
+		"FirmwareVersion": builtAppVersion,
+		"PowerState":      "On",
+		"Status":          gin.H{"State": "Enabled", "Health": "OK"},
+		"Links": gin.H{
+			"ManagerForServers": []gin.H{
+				{"@odata.id": "/redfish/v1/Systems/" + redfishSystemID},
+			},
+			"ManagerForChassis": []gin.H{
+				{"@odata.id": "/redfish/v1/Chassis/" + redfishChassisID},
+			},
+		},
+	})
+}
+
+func handleRedfishChassisCollection(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"@odata.type":         "#ChassisCollection.ChassisCollection",
+		"@odata.id":           "/redfish/v1/Chassis",
+		"Name":                "Chassis Collection",
+		"Members@odata.count": 1,
+		"Members": []gin.H{
+			{"@odata.id": "/redfish/v1/Chassis/" + redfishChassisID},
+		},
+	})
+}
+
+func handleRedfishChassis(c *gin.Context) {
+	if c.Param("id") != redfishChassisID {
+		redfishError(c, http.StatusNotFound, "Chassis not found")
+		return
+	}
+
+	chassis := gin.H{
+		"@odata.type":  "#Chassis.v1_10_0.Chassis",
+		"@odata.id":    "/redfish/v1/Chassis/" + redfishChassisID,
+		"Id":           redfishChassisID,
+		"Name":         "Managed Chassis",
+		"ChassisType":  "RackMount",
+		"Manufacturer": "JetKVM",
+		"Status":       gin.H{"State": "Enabled", "Health": "OK"},
+		"Links": gin.H{
+			"ComputerSystems": []gin.H{
+				{"@odata.id": "/redfish/v1/Systems/" + redfishSystemID},
+			},
+			"ManagedBy": []gin.H{
+				{"@odata.id": "/redfish/v1/Managers/" + redfishManagerID},
+			},
+		},
+	}
+
+	if state := redfishPowerState(); state != "" {
+		chassis["PowerState"] = state
+	}
+
+	c.JSON(http.StatusOK, chassis)
+}
+
+// SessionService is advertised but sessions are not implemented: the host
+// interface authenticates per-request (Basic, or unauthenticated over the USB
+// link). Redfish clients probe this during discovery and treat a well-formed
+// empty collection as "use Basic auth".
+func handleRedfishSessionService(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"@odata.type":    "#SessionService.v1_1_8.SessionService",
+		"@odata.id":      "/redfish/v1/SessionService",
+		"Id":             "SessionService",
+		"Name":           "Session Service",
+		"ServiceEnabled": false,
+		"Sessions":       gin.H{"@odata.id": "/redfish/v1/SessionService/Sessions"},
+	})
+}
+
+func handleRedfishSessions(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"@odata.type":         "#SessionCollection.SessionCollection",
+		"@odata.id":           "/redfish/v1/SessionService/Sessions",
+		"Name":                "Session Collection",
+		"Members@odata.count": 0,
+		"Members":             []gin.H{},
+	})
 }
 
 // redfishAuthMiddleware authenticates Redfish requests with HTTP Basic auth
@@ -54,6 +204,19 @@ func registerRedfishRoutes(r *gin.Engine) {
 func redfishAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if config.LocalAuthMode == "noPassword" {
+			c.Next()
+			return
+		}
+
+		// Requests over the USB host interface are unauthenticated. DSP0270
+		// permits "no auth" in the host-interface protocol record, and the
+		// alternative -- bootstrap credentials -- is delivered over IPMI, which
+		// this hardware has no transport for (see the notes in
+		// internal/usbgadget/ethernet.go). The boundary this rests on is that
+		// usb0 is a point-to-point CDC-ECM link to the one managed host and is
+		// not routed: see configureEthernetGadgetInterface() in usb.go, which
+		// assigns a link-local address and no gateway.
+		if isRedfishHostInterfaceRequest(c) {
 			c.Next()
 			return
 		}
@@ -81,13 +244,20 @@ func handleRedfishServiceRoot(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"@odata.type":    "#ServiceRoot.v1_5_0.ServiceRoot",
 		"@odata.id":      "/redfish/v1/",
+		"@odata.context": "/redfish/v1/$metadata#ServiceRoot.ServiceRoot",
 		"Id":             "RootService",
 		"Name":           "JetKVM Redfish Service",
 		"RedfishVersion": redfishVersion,
-		"UUID":           GetDeviceID(),
+		"UUID":           redfishUUID(),
 		"Product":        "JetKVM",
 		"Vendor":         "JetKVM",
 		"Systems":        gin.H{"@odata.id": "/redfish/v1/Systems"},
+		"Managers":       gin.H{"@odata.id": "/redfish/v1/Managers"},
+		"Chassis":        gin.H{"@odata.id": "/redfish/v1/Chassis"},
+		"SessionService": gin.H{"@odata.id": "/redfish/v1/SessionService"},
+		"Links": gin.H{
+			"Sessions": gin.H{"@odata.id": "/redfish/v1/SessionService/Sessions"},
+		},
 	})
 }
 

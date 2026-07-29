@@ -236,6 +236,9 @@ func setupRouter() *gin.Engine {
 		protected.POST("/jsonrpc", handleJSONRPCHttp)
 	}
 
+	// Redfish power-control endpoints (own Basic-auth group)
+	registerRedfishRoutes(r)
+
 	// Catch-all route for SPA
 	r.NoRoute(func(c *gin.Context) {
 		if c.Request.Method == "GET" && c.NegotiateFormat(gin.MIMEHTML) == gin.MIMEHTML {

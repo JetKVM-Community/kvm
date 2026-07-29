@@ -178,6 +178,7 @@ var (
 		Keyboard:      true,
 		MassStorage:   true,
 		Audio:         true,
+		IpmiKcs:       false,
 	}
 )
 

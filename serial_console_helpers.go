@@ -184,12 +184,12 @@ func normalize(in []byte, opt NormalizationOptions) string {
 					24: "CAN", 25: "EM", 26: "SUB", 27: "ESC", 28: "FS", 29: "GS", 30: "RS", 31: "US", 127: "DEL",
 				}
 				if n, ok := names[b]; ok {
-					out.WriteString("<" + n + ">")
+					fmt.Fprintf(&out, "<%s>", n)
 				} else {
-					out.WriteString(fmt.Sprintf("0x%02X", b))
+					fmt.Fprintf(&out, "0x%02X", b)
 				}
 			case ModeHex:
-				out.WriteString(fmt.Sprintf("\\x%02X", b))
+				fmt.Fprintf(&out, "\\x%02X", b)
 			}
 			i++
 			continue

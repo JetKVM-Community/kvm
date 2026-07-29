@@ -10,6 +10,12 @@ import (
 
 var gadget *usbgadget.UsbGadget
 
+// The IPMI device is a CDC-ACM serial function (see
+// internal/usbgadget/ipmi_kcs.go), so there is nothing to configure on the
+// gadget side once it is bound: the kernel creates /dev/ttyGS1 directly. This
+// replaces the former CDC-ECM path, which needed usb0 brought up with a
+// link-local address before the host could reach the JetKVM.
+
 func effectiveUsbDevices() *usbgadget.Devices {
 	if config == nil || config.UsbDevices == nil {
 		return nil

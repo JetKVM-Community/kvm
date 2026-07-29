@@ -992,6 +992,8 @@
     "usb_device_enable_absolute_mouse_title": "Enable Absolute Mouse (Pointer)",
     "usb_device_enable_audio_description": "Allow JetKVM to present an audio device when Audio is enabled.",
     "usb_device_enable_audio_title": "Enable USB Audio",
+    "usb_device_enable_ipmi_kcs_description": "Exposes a second USB serial (CDC-ACM) device carrying IPMI to the target host, for ipmitool -I serial-basic",
+    "usb_device_enable_ipmi_kcs_title": "Enable IPMI KCS",
     "usb_device_enable_keyboard_description": "Enable Keyboard",
     "usb_device_enable_keyboard_title": "Enable Keyboard",
     "usb_device_enable_mass_storage_description": "Sometimes it might need to be disabled to prevent issues with certain devices",

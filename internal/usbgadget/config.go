@@ -65,6 +65,8 @@ var defaultGadgetConfig = map[string]gadgetConfigItem{
 	"mass_storage_lun0": massStorageLun0Config,
 	// serial console (CDC-ACM)
 	"serial_console": serialConsoleConfig,
+	// IPMI over serial (a second CDC-ACM function; see ipmi_kcs.go)
+	"ipmi_kcs": ipmiKcsConfig,
 }
 
 func (u *UsbGadget) isGadgetConfigItemEnabled(itemKey string) bool {
@@ -81,6 +83,8 @@ func (u *UsbGadget) isGadgetConfigItemEnabled(itemKey string) bool {
 		return u.enabledDevices.MassStorage
 	case "serial_console":
 		return u.enabledDevices.SerialConsole
+	case "ipmi_kcs":
+		return u.enabledDevices.IpmiKcs
 	case "audio":
 		return u.enabledDevices.Audio
 	default:

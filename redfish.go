@@ -217,43 +217,8 @@ func handleRedfishSessions(c *gin.Context) {
 // arrived over the USB host interface or the LAN -- which is the distinction
 // that decides whether auth is skipped, and the first thing worth knowing when
 // firmware-side discovery appears to do nothing.
-// redfishHostSeen records the last time a Redfish request arrived from the
-// managed host over the USB link. The BMC's own address on that link is
-// excluded so local probes do not count.
-//
-// usb.go uses this as the stop condition for its CDC-ECM link announcements:
-// once the host has actually reached the service, its firmware evidently has
-// media and there is nothing left to announce.
-var (
-	redfishHostSeenLock sync.Mutex
-	redfishHostSeenAt   time.Time
-)
-
-func noteRedfishHostSeen(clientIP string) {
-	bmcIP, _, err := net.ParseCIDR(ethernetGadgetAddress)
-	if err == nil && clientIP == bmcIP.String() {
-		return
-	}
-
-	redfishHostSeenLock.Lock()
-	redfishHostSeenAt = time.Now()
-	redfishHostSeenLock.Unlock()
-}
-
-// redfishHostInterfaceSeenSince reports whether the host has issued a Redfish
-// request over the host interface since the given time.
-func redfishHostInterfaceSeenSince(since time.Time) bool {
-	redfishHostSeenLock.Lock()
-	defer redfishHostSeenLock.Unlock()
-	return !redfishHostSeenAt.IsZero() && redfishHostSeenAt.After(since)
-}
-
 func redfishRequestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if isRedfishHostInterfaceRequest(c) {
-			noteRedfishHostSeen(c.ClientIP())
-		}
-
 		redfishLogger.Info().
 			Str("method", c.Request.Method).
 			Str("path", c.Request.URL.Path).

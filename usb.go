@@ -122,18 +122,9 @@ func hostLikelyPowered() bool {
 // Redfish host interface for the rest of the boot.
 const hostEnumerationGrace = 90 * time.Second
 
-// How long, and how often, to re-announce the CDC-ECM link after the host
-// attaches. The window has to span from enumeration to the point in BDS where
-// the firmware's USB-net driver binds and starts polling -- measured at roughly
-// 20-30 s on this board -- because an announcement before that is not heard.
-// See announceHostInterfaceLink().
-const (
-	hostInterfaceAnnounceWindow   = 75 * time.Second
-	hostInterfaceAnnounceInterval = 5 * time.Second
-)
-
 var (
 	hostPowerOnAt   time.Time
+	usbDetachedAt   time.Time
 	hostPowerOnLock sync.Mutex
 )
 
@@ -144,16 +135,45 @@ func noteHostPoweredOn(at time.Time) {
 	hostPowerOnAt = at
 }
 
-// withinHostEnumerationGrace reports whether the host is still inside the window
-// where it is expected not to have enumerated us yet.
+// noteUsbDetached records when the gadget stopped being attached, and clears
+// that once it is attached again.
+//
+// This is what makes the grace cover a *warm reboot*, not just a power-on. A
+// rebooting host drops off the bus and re-enumerates without any power
+// transition, so keying the grace on power-on alone left the reboot case
+// unprotected: the gadget detached, nothing looked recent, and recovery rebound
+// within ~5 s -- in the middle of the host's re-enumeration. That is the same
+// destructive rebind the power-on grace exists to prevent, and it is what left
+// the host sitting at its boot splash after `systemctl reboot` while the BMC
+// logged repeated rebind cycles.
+func noteUsbDetached(detached bool, at time.Time) {
+	hostPowerOnLock.Lock()
+	defer hostPowerOnLock.Unlock()
+
+	if !detached {
+		usbDetachedAt = time.Time{}
+		return
+	}
+	if usbDetachedAt.IsZero() {
+		usbDetachedAt = at
+	}
+}
+
+// withinHostEnumerationGrace reports whether the host is still inside a window
+// where it is expected not to have enumerated us yet -- either because it was
+// just powered on, or because it just dropped off the bus and is presumably
+// coming back (reset, reboot, firmware re-enumeration).
 func withinHostEnumerationGrace(now time.Time) bool {
 	hostPowerOnLock.Lock()
 	defer hostPowerOnLock.Unlock()
 
-	if hostPowerOnAt.IsZero() {
-		return false
+	if !hostPowerOnAt.IsZero() && now.Sub(hostPowerOnAt) < hostEnumerationGrace {
+		return true
 	}
-	return now.Sub(hostPowerOnAt) < hostEnumerationGrace
+	if !usbDetachedAt.IsZero() && now.Sub(usbDetachedAt) < hostEnumerationGrace {
+		return true
+	}
+	return false
 }
 
 // ensureHostInterfaceReady makes the USB gadget presentable to a host that is
@@ -198,81 +218,6 @@ func ensureHostInterfaceReady(reason string) {
 		Str("reason", reason).
 		Str("usb_state", gadget.GetUsbState()).
 		Msg("USB host interface ready for host enumeration")
-}
-
-// announceHostInterfaceLink re-emits the CDC-ECM "network connected"
-// notification so the host's UEFI network driver records the link as up.
-//
-// edk2's USB-net stack starts CableDetect at 0 (NetworkCommon/DriverBinding.c)
-// and only raises it on catching a USB_CDC_NETWORK_CONNECTION notification with
-// NETWORK_CONNECTED (NetworkCommon/PxeFunction.c). Linux's f_ecm sends that
-// notification on state changes -- at set_alt during enumeration, and whenever
-// the gadget netdev opens or closes. Enumeration happens long before the UEFI
-// driver binds and starts polling the interrupt endpoint, so the firmware
-// misses the only notification it would ever get: CableDetect stays 0, SNP
-// reports no media, and every HTTP request fails before a packet is sent.
-// Observed on hardware 2026-07-30:
-//
-//	NucRedfishSync: GET /redfish/v1/ -> No Media
-//
-// Taking the gadget netdev down and back up makes f_ecm emit DISCONNECT then
-// CONNECTED again. Doing that a few seconds after the host attaches puts a
-// fresh notification in front of a driver that is by then listening.
-//
-// It is deliberately repeated: the exact moment the UEFI driver starts polling
-// is not observable from here, so the announcements are spread across the window
-// between enumeration and BDS. Each one is a link bounce on an unrouted
-// point-to-point link whose only consumer is the managed host's firmware.
-//
-// The loop stops as soon as the host reaches the Redfish service, so a working
-// link is never flapped -- and in any case stops at the end of the window, well
-// inside the firmware phase.
-func announceHostInterfaceLink(reason string) {
-	devices := effectiveUsbDevices()
-	if devices == nil || !devices.Ethernet {
-		return
-	}
-
-	started := time.Now()
-	deadline := started.Add(hostInterfaceAnnounceWindow)
-
-	for time.Now().Before(deadline) {
-		time.Sleep(hostInterfaceAnnounceInterval)
-
-		// The host has reached the Redfish service, so its firmware has media
-		// and further announcements would only flap a working link.
-		if redfishHostInterfaceSeenSince(started) {
-			usbLogger.Info().
-				Str("reason", reason).
-				Msg("host reached the Redfish service; stopping CDC-ECM link announcements")
-			return
-		}
-
-		link, err := netlink.LinkByName(ethernetGadgetInterface)
-		if err != nil {
-			usbLogger.Debug().Err(err).Str("reason", reason).Msg("usb ethernet interface gone; skipping link announce")
-			return
-		}
-
-		if err := netlink.LinkSetDown(link); err != nil {
-			usbLogger.Debug().Err(err).Msg("failed to bounce usb ethernet link down")
-			continue
-		}
-		time.Sleep(200 * time.Millisecond)
-		if err := netlink.LinkSetUp(link); err != nil {
-			usbLogger.Warn().Err(err).Msg("failed to bring usb ethernet link back up")
-			continue
-		}
-
-		// The address survives a link bounce, but re-assert it rather than
-		// assume: this is the address the host interface record points at.
-		configureEthernetGadgetInterface()
-
-		usbLogger.Info().
-			Str("iface", ethernetGadgetInterface).
-			Str("reason", reason).
-			Msg("announced CDC-ECM link to host (re-emitted NETWORK_CONNECTED)")
-	}
 }
 
 func effectiveUsbDevices() *usbgadget.Devices {
@@ -457,11 +402,13 @@ func attemptUSBRecovery(state string) string {
 		return state
 	}
 
-	// Powered, but not long enough to have enumerated us yet.
+	// Powered, but either just powered on or freshly off the bus -- in both
+	// cases it is expected not to have enumerated us yet, and a rebind now is
+	// the thing most likely to break its one enumeration pass.
 	if withinHostEnumerationGrace(now) {
 		usbLogger.Debug().
 			Str("state", state).
-			Msg("host is still in its power-on enumeration window; not rebinding USB gadget")
+			Msg("host is inside its enumeration window (power-on or reset); not rebinding USB gadget")
 		return state
 	}
 
@@ -548,6 +495,11 @@ func triggerUSBStateUpdate() {
 
 func checkUSBState() {
 	newState := gadget.GetUsbState()
+
+	// Record the detach *before* considering recovery: a host that is rebooting
+	// looks exactly like this, and the grace window is measured from here.
+	noteUsbDetached(newState == usbgadget.USBStateNotAttached, time.Now())
+
 	if newState == usbgadget.USBStateNotAttached {
 		newState = attemptUSBRecovery(newState)
 	}
@@ -568,14 +520,6 @@ func checkUSBState() {
 	oldState := usbState
 	usbState = newState
 	usbLogger.Info().Str("from", oldState).Str("to", newState).Msg("USB state changed")
-
-	// The host has just attached, so its firmware is about to bind a driver to
-	// the CDC-ECM function. Re-announce the link so that driver sees the
-	// interface as having media -- without this the Redfish host interface is
-	// present but unusable. See announceHostInterfaceLink().
-	if oldState != newState && newState != usbgadget.USBStateNotAttached && newState != usbgadget.USBStateUnknown {
-		go announceHostInterfaceLink("host_attached")
-	}
 
 	if newState != usbgadget.USBStateNotAttached {
 		openErr := gadget.OpenKeyboardHidFile()

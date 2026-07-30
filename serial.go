@@ -227,6 +227,7 @@ func runDCControl() {
 		watts := milliWatts / 1000 // Convert mW to W
 
 		dcStateMu.Lock()
+		wasOn := dcState.IsOn
 		dcState.IsOn = powerState == 1
 		dcState.RestoreState = restoreState
 		dcState.Voltage = volts
@@ -234,6 +235,15 @@ func runDCControl() {
 		dcState.Power = watts
 		snapshot := dcState
 		dcStateMu.Unlock()
+
+		// The host just came up and is about to enumerate USB. Get the gadget
+		// into a state its firmware can bind a CDC-ECM NIC from, before that
+		// one-shot window closes -- without this the Redfish host interface is
+		// a coin flip on every power-on. See ensureHostInterfaceReady().
+		if !wasOn && snapshot.IsOn {
+			noteHostPoweredOn(time.Now())
+			go ensureHostInterfaceReady("host_power_on")
+		}
 
 		// Update Prometheus metrics
 		updateDCMetrics(snapshot)

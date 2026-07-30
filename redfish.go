@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -70,7 +71,19 @@ func registerRedfishRoutes(r *gin.Engine) {
 		c.JSON(http.StatusOK, gin.H{"v1": "/redfish/v1/"})
 	})
 
+	// Emit the contract at startup. The service UUID must match the one compiled
+	// into the firmware's SMBIOS type 42 protocol record
+	// (NucRedfishHostInterfaceLib.c) or RedfishDiscoverDxe will refuse to
+	// correlate the interface -- and a mismatch is otherwise silent on both
+	// sides, so log it where it can be diffed against `cbmem -c`.
+	redfishLogger.Info().
+		Str("uuid", redfishUUID()).
+		Str("host_interface_subnet", redfishHostInterfaceSubnet).
+		Str("auth", string(config.LocalAuthMode)).
+		Msg("Redfish service registered at /redfish/v1")
+
 	v1 := r.Group("/redfish/v1")
+	v1.Use(redfishRequestLogger())
 	v1.Use(redfishAuthMiddleware())
 	v1.Use(func(c *gin.Context) {
 		c.Header("OData-Version", "4.0")
@@ -80,6 +93,7 @@ func registerRedfishRoutes(r *gin.Engine) {
 		v1.GET("/", handleRedfishServiceRoot)
 		v1.GET("/Systems", handleRedfishSystemsCollection)
 		v1.GET("/Systems/:id", handleRedfishSystem)
+		v1.PATCH("/Systems/:id", handleRedfishSystemPatch)
 		v1.POST("/Systems/:id/Actions/ComputerSystem.Reset", handleRedfishSystemReset)
 		v1.GET("/Managers", handleRedfishManagersCollection)
 		v1.GET("/Managers/:id", handleRedfishManager)
@@ -198,6 +212,59 @@ func handleRedfishSessions(c *gin.Context) {
 	})
 }
 
+// redfishRequestLogger records every Redfish request before authentication
+// runs. gin's own logger reports the result, but not whether the request
+// arrived over the USB host interface or the LAN -- which is the distinction
+// that decides whether auth is skipped, and the first thing worth knowing when
+// firmware-side discovery appears to do nothing.
+// redfishHostSeen records the last time a Redfish request arrived from the
+// managed host over the USB link. The BMC's own address on that link is
+// excluded so local probes do not count.
+//
+// usb.go uses this as the stop condition for its CDC-ECM link announcements:
+// once the host has actually reached the service, its firmware evidently has
+// media and there is nothing left to announce.
+var (
+	redfishHostSeenLock sync.Mutex
+	redfishHostSeenAt   time.Time
+)
+
+func noteRedfishHostSeen(clientIP string) {
+	bmcIP, _, err := net.ParseCIDR(ethernetGadgetAddress)
+	if err == nil && clientIP == bmcIP.String() {
+		return
+	}
+
+	redfishHostSeenLock.Lock()
+	redfishHostSeenAt = time.Now()
+	redfishHostSeenLock.Unlock()
+}
+
+// redfishHostInterfaceSeenSince reports whether the host has issued a Redfish
+// request over the host interface since the given time.
+func redfishHostInterfaceSeenSince(since time.Time) bool {
+	redfishHostSeenLock.Lock()
+	defer redfishHostSeenLock.Unlock()
+	return !redfishHostSeenAt.IsZero() && redfishHostSeenAt.After(since)
+}
+
+func redfishRequestLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if isRedfishHostInterfaceRequest(c) {
+			noteRedfishHostSeen(c.ClientIP())
+		}
+
+		redfishLogger.Info().
+			Str("method", c.Request.Method).
+			Str("path", c.Request.URL.Path).
+			Str("client_ip", c.ClientIP()).
+			Bool("host_interface", isRedfishHostInterfaceRequest(c)).
+			Str("user_agent", c.Request.UserAgent()).
+			Msg("Redfish request")
+		c.Next()
+	}
+}
+
 // redfishAuthMiddleware authenticates Redfish requests with HTTP Basic auth
 // (any username, the device password). In noPassword mode it is open, matching
 // the rest of the local API.
@@ -217,6 +284,9 @@ func redfishAuthMiddleware() gin.HandlerFunc {
 		// not routed: see configureEthernetGadgetInterface() in usb.go, which
 		// assigns a link-local address and no gateway.
 		if isRedfishHostInterfaceRequest(c) {
+			redfishLogger.Debug().
+				Str("client_ip", c.ClientIP()).
+				Msg("unauthenticated: request arrived over the USB host interface")
 			c.Next()
 			return
 		}
@@ -279,17 +349,59 @@ func handleRedfishSystem(c *gin.Context) {
 		return
 	}
 
+	c.JSON(http.StatusOK, redfishSystemResource())
+}
+
+// redfishSystemResource renders the ComputerSystem. Identity fields are whatever
+// the managed host last reported over the host interface; anything it has not
+// reported is omitted rather than guessed, so a client can tell "the host has
+// not checked in" from "the host says it is a NUC".
+func redfishSystemResource() gin.H {
+	redfishHostMu.RLock()
+	host := redfishHost
+	redfishHostMu.RUnlock()
+
 	system := gin.H{
-		"@odata.type":  "#ComputerSystem.v1_5_0.ComputerSystem",
-		"@odata.id":    "/redfish/v1/Systems/" + redfishSystemID,
-		"Id":           redfishSystemID,
-		"Name":         "JetKVM Managed System",
-		"SystemType":   "Physical",
-		"Manufacturer": "JetKVM",
+		"@odata.type": "#ComputerSystem.v1_5_0.ComputerSystem",
+		"@odata.id":   "/redfish/v1/Systems/" + redfishSystemID,
+		"Id":          redfishSystemID,
+		"Name":        "JetKVM Managed System",
+		"SystemType":  "Physical",
 		"Status": gin.H{
 			"State":  "Enabled",
 			"Health": "OK",
 		},
+		"Boot": gin.H{
+			"BootSourceOverrideTarget":                         host.BootOverrideTarget,
+			"BootSourceOverrideEnabled":                        host.BootOverrideEnabled,
+			"BootSourceOverrideTarget@Redfish.AllowableValues": redfishBootOverrideTargets,
+		},
+	}
+
+	// Manufacturer defaults to the BMC vendor only while the host is silent;
+	// once it reports, its own SMBIOS values win.
+	if host.Manufacturer != "" {
+		system["Manufacturer"] = host.Manufacturer
+	} else {
+		system["Manufacturer"] = "JetKVM"
+	}
+	for key, value := range map[string]string{
+		"BiosVersion":  host.BiosVersion,
+		"Model":        host.Model,
+		"SerialNumber": host.SerialNumber,
+		"UUID":         host.UUID,
+	} {
+		if value != "" {
+			system[key] = value
+		}
+	}
+
+	if host.BootProgress != "" {
+		progress := gin.H{"LastState": host.BootProgress}
+		if !host.ReportedAt.IsZero() {
+			progress["LastStateTime"] = host.ReportedAt.UTC().Format(time.RFC3339)
+		}
+		system["BootProgress"] = progress
 	}
 
 	if state := redfishPowerState(); state != "" {
@@ -307,7 +419,158 @@ func handleRedfishSystem(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, system)
+	return system
+}
+
+// redfishHostState holds what the managed host has reported about itself over
+// the host interface, plus the boot override an operator has staged for it.
+//
+// The BMC has no in-band view of the host -- over the USB link it sees a NIC and
+// nothing else -- so every identity field here arrives by PATCH from the host's
+// firmware (NucRedfishSyncDxe) and is served straight back out of memory. It is
+// deliberately not persisted: it describes the currently running host, and a
+// stale copy surviving a BMC restart would be worse than reporting nothing.
+type redfishHostState struct {
+	BiosVersion  string
+	Manufacturer string
+	Model        string
+	SerialNumber string
+	UUID         string
+
+	BootProgress string
+	ReportedAt   time.Time
+
+	// Boot override staged by an operator (PATCH from the LAN side) and
+	// consumed by the host's firmware on its next boot.
+	BootOverrideTarget  string
+	BootOverrideEnabled string
+}
+
+// The lock is kept out of redfishHostState so callers can take a snapshot by
+// plain assignment under the read lock and release it before rendering.
+var (
+	redfishHostMu sync.RWMutex
+	redfishHost   = redfishHostState{
+		BootOverrideTarget:  "None",
+		BootOverrideEnabled: "Disabled",
+	}
+)
+
+// redfishSystemPatch is the subset of ComputerSystem this service accepts. Every
+// field is optional: the host reports identity and boot progress, an operator
+// stages a boot override, and neither has to send the other's fields.
+type redfishSystemPatch struct {
+	BiosVersion  *string `json:"BiosVersion"`
+	Manufacturer *string `json:"Manufacturer"`
+	Model        *string `json:"Model"`
+	SerialNumber *string `json:"SerialNumber"`
+	UUID         *string `json:"UUID"`
+
+	BootProgress *struct {
+		LastState *string `json:"LastState"`
+	} `json:"BootProgress"`
+
+	Boot *struct {
+		BootSourceOverrideTarget  *string `json:"BootSourceOverrideTarget"`
+		BootSourceOverrideEnabled *string `json:"BootSourceOverrideEnabled"`
+	} `json:"Boot"`
+}
+
+// redfishBootOverrideTargets are the BootSourceOverrideTarget values the host
+// firmware knows how to apply (NucRedfishSyncDxe.ApplyBootOverride). Rejecting
+// anything else here means an operator finds out immediately, rather than the
+// setting silently doing nothing at the next boot.
+var redfishBootOverrideTargets = []string{"None", "Pxe", "Hdd", "BiosSetup", "UefiHttp"}
+
+func redfishValidBootTarget(target string) bool {
+	for _, t := range redfishBootOverrideTargets {
+		if t == target {
+			return true
+		}
+	}
+	return false
+}
+
+// handleRedfishSystemPatch accepts a ComputerSystem update. Two very different
+// callers land here: the managed host's firmware reporting inventory and boot
+// progress over the USB host interface, and an operator on the LAN staging a
+// one-time boot override. Both are modelled as PATCH on the same resource
+// because that is what Redfish specifies; they are told apart for logging by
+// which subtree they touch.
+func handleRedfishSystemPatch(c *gin.Context) {
+	if c.Param("id") != redfishSystemID {
+		redfishError(c, http.StatusNotFound, "System not found")
+		return
+	}
+
+	var patch redfishSystemPatch
+	if err := c.ShouldBindJSON(&patch); err != nil {
+		redfishError(c, http.StatusBadRequest, "Malformed ComputerSystem payload")
+		return
+	}
+
+	if patch.Boot != nil && patch.Boot.BootSourceOverrideTarget != nil &&
+		!redfishValidBootTarget(*patch.Boot.BootSourceOverrideTarget) {
+		redfishError(c, http.StatusBadRequest, fmt.Sprintf(
+			"BootSourceOverrideTarget must be one of %v", redfishBootOverrideTargets))
+		return
+	}
+
+	fromHost := isRedfishHostInterfaceRequest(c)
+
+	redfishHostMu.Lock()
+	if patch.BiosVersion != nil {
+		redfishHost.BiosVersion = *patch.BiosVersion
+	}
+	if patch.Manufacturer != nil {
+		redfishHost.Manufacturer = *patch.Manufacturer
+	}
+	if patch.Model != nil {
+		redfishHost.Model = *patch.Model
+	}
+	if patch.SerialNumber != nil {
+		redfishHost.SerialNumber = *patch.SerialNumber
+	}
+	if patch.UUID != nil {
+		redfishHost.UUID = *patch.UUID
+	}
+	if patch.BootProgress != nil && patch.BootProgress.LastState != nil {
+		redfishHost.BootProgress = *patch.BootProgress.LastState
+	}
+	if patch.Boot != nil {
+		if patch.Boot.BootSourceOverrideTarget != nil {
+			redfishHost.BootOverrideTarget = *patch.Boot.BootSourceOverrideTarget
+		}
+		if patch.Boot.BootSourceOverrideEnabled != nil {
+			redfishHost.BootOverrideEnabled = *patch.Boot.BootSourceOverrideEnabled
+		}
+	}
+	if fromHost {
+		redfishHost.ReportedAt = time.Now()
+	}
+	snapshot := redfishHost
+	redfishHostMu.Unlock()
+
+	// This line is the acknowledgement of record: it is what proves the host's
+	// firmware reached the BMC and what it said. Logged at Info so it survives
+	// the default log level.
+	redfishLogger.Info().
+		Bool("host_interface", fromHost).
+		Str("client_ip", c.ClientIP()).
+		Str("bios_version", snapshot.BiosVersion).
+		Str("manufacturer", snapshot.Manufacturer).
+		Str("model", snapshot.Model).
+		Str("serial_number", snapshot.SerialNumber).
+		Str("uuid", snapshot.UUID).
+		Str("boot_progress", snapshot.BootProgress).
+		Str("boot_override_target", snapshot.BootOverrideTarget).
+		Str("boot_override_enabled", snapshot.BootOverrideEnabled).
+		Msg("Redfish ComputerSystem updated")
+
+	// Reply with the resource as it now stands rather than 204: the host's
+	// firmware reads the boot override out of this same body, so answering the
+	// PATCH with it saves a round trip on the boot path.
+	c.JSON(http.StatusOK, redfishSystemResource())
 }
 
 type redfishResetRequest struct {

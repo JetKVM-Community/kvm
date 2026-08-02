@@ -445,7 +445,13 @@ type redfishSystemPatch struct {
 // firmware knows how to apply (NucRedfishSyncDxe.ApplyBootOverride). Rejecting
 // anything else here means an operator finds out immediately, rather than the
 // setting silently doing nothing at the next boot.
-var redfishBootOverrideTargets = []string{"None", "Pxe", "Hdd", "BiosSetup", "UefiHttp"}
+//
+// "Pxe" resolves to the iPXE image built into the payload firmware volume --
+// that is what network boot means on this platform. "UefiHttp" is deliberately
+// absent: the payload is built with NETWORK_HTTP_BOOT_ENABLE=FALSE, so no HTTP
+// boot option exists for the host to select, and advertising it would be the
+// same silent no-op this list exists to prevent.
+var redfishBootOverrideTargets = []string{"None", "Pxe", "Hdd", "BiosSetup"}
 
 func redfishValidBootTarget(target string) bool {
 	for _, t := range redfishBootOverrideTargets {

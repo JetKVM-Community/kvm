@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -97,6 +98,9 @@ var redfishClient = redfishClientState{
 func registerRedfishClientRoutes(v1 *gin.RouterGroup) {
 	v1.GET("/TaskService", handleRedfishTaskService)
 	v1.GET("/TaskService/Tasks", handleRedfishTasks)
+	v1.GET("/TaskService/Tasks/:task", handleRedfishTask)
+	v1.DELETE("/TaskService/Tasks/:task", handleRedfishTaskDelete)
+	v1.GET("/TaskService/Tasks/:task/Monitor", handleRedfishTaskMonitor)
 
 	v1.GET("/Registries", handleRedfishRegistries)
 	v1.GET("/Registries/:id", handleRedfishRegistry)
@@ -233,11 +237,11 @@ func redfishSystemMatches(c *gin.Context) bool {
 
 // --- TaskService -----------------------------------------------------------
 //
-// RedfishTaskServiceDxe polls this on every boot to find out whether the BMC
-// has queued any work for the firmware. Nothing here creates tasks yet, but the
-// resource has to exist and be a real TaskService: the driver reports
-// "Fail to dispatch Redfish tasks: Device Error" for anything it cannot parse,
-// and that is exactly what it got when gin served the web UI's index.html here.
+// The tasks themselves, their lifecycle and the task monitor are in
+// redfish_task.go. Only the service resource lives here, next to the rest of
+// the tree the host firmware walks -- RedfishTaskServiceDxe reads it on every
+// boot, and reported "Fail to dispatch Redfish tasks: Device Error" for as long
+// as gin answered this URI with the web UI's index.html.
 
 func handleRedfishTaskService(c *gin.Context) {
 	redfishJSON(c, gin.H{
@@ -246,23 +250,14 @@ func handleRedfishTaskService(c *gin.Context) {
 		"Id":                              "TaskService",
 		"Name":                            "Task Service",
 		"ServiceEnabled":                  true,
+		"DateTime":                        time.Now().UTC().Format(time.RFC3339),
 		"CompletedTaskOverWritePolicy":    "Oldest",
 		"LifeCycleEventOnTaskStateChange": false,
 		"Status": gin.H{
 			"State":  "Enabled",
 			"Health": "OK",
 		},
-		"Tasks": gin.H{"@odata.id": redfishTaskServiceURI + "/Tasks"},
-	})
-}
-
-func handleRedfishTasks(c *gin.Context) {
-	redfishJSON(c, gin.H{
-		"@odata.type":         "#TaskCollection.TaskCollection",
-		"@odata.id":           redfishTaskServiceURI + "/Tasks",
-		"Name":                "Task Collection",
-		"Members@odata.count": 0,
-		"Members":             []gin.H{},
+		"Tasks": gin.H{"@odata.id": redfishTasksURI},
 	})
 }
 

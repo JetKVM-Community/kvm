@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -590,6 +591,20 @@ type redfishResetRequest struct {
 	ResetType string `json:"ResetType"`
 }
 
+// handleRedfishSystemReset starts the reset as a Task and returns 202 with the
+// task monitor in Location.
+//
+// This used to be synchronous, returning 204 as soon as the JSON-RPC call came
+// back. That answered the wrong question. "PowerCycle" on the dc-power
+// extension drops the rail, sleeps two seconds *inside the request*, and raises
+// it again; 204 then meant "the message was sent", and a cycle that failed to
+// bring the host back looked exactly like one that worked. The task waits for
+// PowerState to actually reach the requested state and reports what happened.
+//
+// Clients that only care that the request was accepted can ignore the task --
+// 202 with a Location is the response Redfish defines for exactly this, and
+// polling the monitor until it stops returning 202 yields the result the old
+// 204 was pretending to be.
 func handleRedfishSystemReset(c *gin.Context) {
 	if c.Param("id") != redfishSystemID {
 		redfishError(c, http.StatusNotFound, "System not found")
@@ -602,13 +617,24 @@ func handleRedfishSystemReset(c *gin.Context) {
 		return
 	}
 
-	status, err := performRedfishReset(req.ResetType)
-	if err != nil {
-		redfishError(c, status, err.Error())
+	// Reject what this platform cannot do before creating a task for it: a
+	// client should be told "unsupported" now, not have to poll a task to find
+	// out. redfishAllowableResetTypes is what the ComputerSystem advertises.
+	allowable := redfishAllowableResetTypes()
+	if len(allowable) == 0 {
+		redfishError(c, http.StatusServiceUnavailable, "No power-control extension is active")
+		return
+	}
+	if !slices.Contains(allowable, req.ResetType) {
+		redfishError(c, http.StatusBadRequest,
+			fmt.Sprintf("Unsupported ResetType %q for the %s extension", req.ResetType, config.ActiveExtension))
 		return
 	}
 
-	c.Status(status)
+	task := redfishStartResetTask(req.ResetType)
+
+	c.Header("Location", redfishTaskMonitorURI(task.ID))
+	c.JSON(http.StatusAccepted, redfishTaskResource(task))
 }
 
 // redfishPowerState returns the Redfish PowerState ("On"/"Off") for the active

@@ -377,6 +377,7 @@ func redfishSystemResource() gin.H {
 		"Bios":       gin.H{"@odata.id": redfishBiosURI},
 		"SecureBoot": gin.H{"@odata.id": redfishSecureBootURI},
 		"Memory":     gin.H{"@odata.id": redfishMemoryURI},
+		"Storage":    gin.H{"@odata.id": redfishStorageRootURI},
 	}
 
 	// Manufacturer defaults to the BMC vendor only while the host is silent;

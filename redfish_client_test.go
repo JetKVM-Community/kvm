@@ -418,3 +418,88 @@ func TestRedfishMemoryPostsAllocateDistinctIds(t *testing.T) {
 		t.Errorf("Members@odata.count = %v, want 3", got)
 	}
 }
+
+// The registry PUT is the whole point of the Bios/:registry route: without it
+// the request fell through to the web UI and the client gave up with
+// "PUT BIOS Attribute Registry failed: Unsupported", leaving every attribute
+// untyped.
+func TestRedfishHostCanProvisionTheBiosAttributeRegistry(t *testing.T) {
+	r := redfishTestRouter(t)
+
+	t.Cleanup(func() {
+		redfishClient.mu.Lock()
+		redfishClient.BiosRegistry = nil
+		redfishClient.mu.Unlock()
+	})
+
+	const uri = "/redfish/v1/Systems/1/Bios/BiosAttributeRegistry.v1_0_0"
+
+	// Before the host reports, saying "no attributes" would be a lie.
+	if code, _ := redfishGetJSON(t, r, uri); code != http.StatusNotFound {
+		t.Fatalf("GET before provisioning = %d, want 404", code)
+	}
+
+	body := `{"@odata.type":"#AttributeRegistry.v1_3_6.AttributeRegistry",` +
+		`"Id":"BiosAttributeRegistry.v1_0_0","RegistryEntries":{"Attributes":[` +
+		`{"AttributeName":"power_on_after_fail","Type":"Enumeration"},` +
+		`{"AttributeName":"fan_profile","Type":"Enumeration"}]}}`
+	req := httptest.NewRequest(http.MethodPut, uri, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "169.254.10.2:1024"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT registry = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+
+	code, got := redfishGetJSON(t, r, uri)
+	if code != http.StatusOK {
+		t.Fatalf("GET after provisioning = %d, want 200", code)
+	}
+	entries, ok := got["RegistryEntries"].(map[string]any)
+	if !ok {
+		t.Fatalf("RegistryEntries missing from %v", got)
+	}
+	attributes, ok := entries["Attributes"].([]any)
+	if !ok || len(attributes) != 2 {
+		t.Fatalf("Attributes = %v, want 2 entries", entries["Attributes"])
+	}
+}
+
+// A registry PUT is host-owned state, so a LAN client must not be able to
+// forge one.
+func TestRedfishBiosAttributeRegistryRejectsLANWrites(t *testing.T) {
+	r := redfishTestRouter(t)
+
+	req := httptest.NewRequest(http.MethodPut,
+		"/redfish/v1/Systems/1/Bios/BiosAttributeRegistry.v1_0_0",
+		strings.NewReader(`{"RegistryEntries":{"Attributes":[]}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "10.0.107.5:1024"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("LAN PUT of the registry = %d, want 403", w.Code)
+	}
+}
+
+// Bios/SD and Bios/Actions/... are static siblings of the :registry wildcard.
+// gin must keep matching them, or adding the registry route would silently
+// break the settings resource the whole BIOS flow depends on.
+func TestRedfishBiosStaticRoutesOutrankTheRegistryWildcard(t *testing.T) {
+	r := redfishTestRouter(t)
+
+	code, body := redfishGetJSON(t, r, "/redfish/v1/Systems/1/Bios/SD")
+	if code != http.StatusOK {
+		t.Fatalf("GET Bios/SD = %d, want 200", code)
+	}
+	if id, _ := body["@odata.id"].(string); !strings.HasSuffix(id, "/Bios/SD") {
+		t.Errorf("Bios/SD served the wrong resource: @odata.id = %v", body["@odata.id"])
+	}
+
+	// An unknown child is a 404, not the registry.
+	if code, _ := redfishGetJSON(t, r, "/redfish/v1/Systems/1/Bios/Nonsense"); code != http.StatusNotFound {
+		t.Errorf("GET an unknown Bios child = %d, want 404", code)
+	}
+}

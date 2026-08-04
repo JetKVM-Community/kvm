@@ -46,6 +46,7 @@ const (
 	redfishBiosID           = "Bios"
 	redfishBiosRegistryID   = "BiosAttributeRegistry.v1_0_0"
 	redfishSecureBootID     = "SecureBoot"
+	redfishStorageID        = "1"
 	redfishSystemURI        = "/redfish/v1/Systems/" + redfishSystemID
 	redfishTaskServiceURI   = "/redfish/v1/TaskService"
 	redfishRegistriesURI    = "/redfish/v1/Registries"
@@ -53,6 +54,9 @@ const (
 	redfishBootOptionsURI   = redfishSystemURI + "/BootOptions"
 	redfishMemoryURI        = redfishSystemURI + "/Memory"
 	redfishSecureBootURI    = redfishSystemURI + "/" + redfishSecureBootID
+	redfishStorageRootURI   = redfishSystemURI + "/Storage"
+	redfishStorageURI       = redfishStorageRootURI + "/" + redfishStorageID
+	redfishDrivesURI        = redfishStorageURI + "/Drives"
 	redfishBiosSettingsPath = "/SD"
 )
 
@@ -77,6 +81,15 @@ type redfishClientState struct {
 	// Memory modules keyed by Id, same ownership.
 	Memory map[string]map[string]any
 
+	// Drives keyed by Id (the drive's serial number), same ownership.
+	Drives map[string]map[string]any
+
+	// BiosRegistry is the BIOS attribute registry the host generates from its
+	// HII forms and PUTs whole. nil until it has done so, which is the honest
+	// answer to a GET: an empty registry would say "this BIOS has no
+	// attributes" rather than "the host has not reported yet".
+	BiosRegistry map[string]any
+
 	SecureBoot map[string]any
 }
 
@@ -85,6 +98,7 @@ var redfishClient = redfishClientState{
 	BiosPending:    map[string]any{},
 	BootOptions:    map[string]map[string]any{},
 	Memory:         map[string]map[string]any{},
+	Drives:         map[string]map[string]any{},
 	SecureBoot: map[string]any{
 		"SecureBootEnable":             false,
 		"SecureBootCurrentBoot":        "Disabled",
@@ -111,6 +125,12 @@ func registerRedfishClientRoutes(v1 *gin.RouterGroup) {
 	v1.GET("/Systems/:id/Bios/SD", handleRedfishBiosSettings)
 	v1.PATCH("/Systems/:id/Bios/SD", handleRedfishBiosSettingsPatch)
 	v1.POST("/Systems/:id/Bios/Actions/Bios.ResetBios", handleRedfishBiosReset)
+	// The attribute registry hangs off Bios rather than off /Registries: the
+	// client builds its URI as <parent of Bios resource>/<AttributeRegistry>,
+	// so it lands here. Registered after the static siblings above, which gin
+	// matches in preference to this wildcard.
+	v1.GET("/Systems/:id/Bios/:registry", handleRedfishBiosRegistry)
+	v1.PUT("/Systems/:id/Bios/:registry", handleRedfishBiosRegistryPut)
 
 	v1.GET("/Systems/:id/BootOptions", handleRedfishBootOptions)
 	v1.POST("/Systems/:id/BootOptions", handleRedfishBootOptionCreate)
@@ -122,6 +142,12 @@ func registerRedfishClientRoutes(v1 *gin.RouterGroup) {
 	v1.POST("/Systems/:id/Memory", handleRedfishMemoryCreate)
 	v1.GET("/Systems/:id/Memory/:module", handleRedfishMemoryModule)
 	v1.PATCH("/Systems/:id/Memory/:module", handleRedfishMemoryModulePatch)
+
+	v1.GET("/Systems/:id/Storage", handleRedfishStorageCollection)
+	v1.GET("/Systems/:id/Storage/:storage", handleRedfishStorage)
+	v1.POST("/Systems/:id/Storage/:storage/Drives", handleRedfishDriveCreate)
+	v1.GET("/Systems/:id/Storage/:storage/Drives/:drive", handleRedfishDrive)
+	v1.PATCH("/Systems/:id/Storage/:storage/Drives/:drive", handleRedfishDrivePatch)
 
 	v1.GET("/Systems/:id/SecureBoot", handleRedfishSecureBoot)
 	v1.PATCH("/Systems/:id/SecureBoot", handleRedfishSecureBootPatch)
@@ -298,7 +324,10 @@ func handleRedfishRegistry(c *gin.Context) {
 		"Location": []gin.H{
 			{
 				"Language": "en",
-				"Uri":      redfishRegistriesURI + "/" + id + "/registry.json",
+				// Point at where the document actually is. The host PUTs it
+				// under the Bios resource, so advertising a /Registries path
+				// here would name a URI nothing serves.
+				"Uri": redfishBiosURI + "/" + id,
 			},
 		},
 	})
@@ -451,6 +480,88 @@ func handleRedfishBiosReset(c *gin.Context) {
 
 	redfishLogger.Info().Msg("pending BIOS settings cleared by Bios.ResetBios")
 	c.Status(http.StatusNoContent)
+}
+
+// --- BIOS attribute registry -----------------------------------------------
+//
+// The registry is what turns the opaque name/value pairs in Bios.Attributes into
+// something an operator can act on: per attribute a display name, a type, and
+// the bounds or enumeration of legal values. BiosAttributeRegistryDxe builds it
+// by walking the host's HII forms and PUTs the whole document here.
+//
+// It arrives at <Bios parent>/<AttributeRegistry> -- the URI the client composes
+// from the Bios resource's own AttributeRegistry property -- rather than under
+// /Registries, which is only where the pointer lives. Without this route the
+// PUT fell through to the web UI's index.html and the client reported
+//
+//	RedfishPutResource: ... :Unsupported
+//	ProvisionAttributeRegistry: PUT BIOS Attribute Registry failed: Unsupported
+//
+// leaving every attribute untyped.
+
+func handleRedfishBiosRegistry(c *gin.Context) {
+	if !redfishSystemMatches(c) {
+		return
+	}
+	if c.Param("registry") != redfishBiosRegistryID {
+		redfishError(c, http.StatusNotFound, "Registry not found")
+		return
+	}
+
+	redfishClient.mu.RLock()
+	registry := redfishCopyMap(redfishClient.BiosRegistry)
+	present := redfishClient.BiosRegistry != nil
+	redfishClient.mu.RUnlock()
+
+	if !present {
+		redfishError(c, http.StatusNotFound, "BIOS attribute registry has not been reported by the host")
+		return
+	}
+	redfishJSON(c, registry)
+}
+
+func handleRedfishBiosRegistryPut(c *gin.Context) {
+	if !redfishSystemMatches(c) || !redfishHostWritable(c) {
+		return
+	}
+	if c.Param("registry") != redfishBiosRegistryID {
+		redfishError(c, http.StatusNotFound, "Registry not found")
+		return
+	}
+
+	var registry map[string]any
+	if err := c.ShouldBindJSON(&registry); err != nil {
+		redfishError(c, http.StatusBadRequest, "Malformed request body")
+		return
+	}
+
+	// PUT replaces. The host regenerates the registry from scratch each boot, so
+	// merging would keep attributes that a firmware update has since removed.
+	redfishClient.mu.Lock()
+	redfishClient.BiosRegistry = registry
+	redfishClient.mu.Unlock()
+
+	redfishLogger.Info().
+		Int("entries", redfishCountRegistryAttributes(registry)).
+		Msg("host reported the BIOS attribute registry")
+
+	redfishJSON(c, registry)
+}
+
+// redfishCountRegistryAttributes digs out RegistryEntries.Attributes purely so
+// the log line above can say how many attributes arrived. Any shape it does not
+// recognise counts as zero rather than failing the request: the registry is the
+// host's document to define, and this is only telemetry.
+func redfishCountRegistryAttributes(registry map[string]any) int {
+	entries, ok := registry["RegistryEntries"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	attributes, ok := entries["Attributes"].([]any)
+	if !ok {
+		return 0
+	}
+	return len(attributes)
 }
 
 // --- BootOptions -----------------------------------------------------------
@@ -716,6 +827,169 @@ func redfishMemoryResource(id string, body map[string]any) gin.H {
 		"@odata.id":   redfishMemoryURI + "/" + id,
 		"Id":          id,
 		"Name":        "Memory Module",
+	}
+	for key, value := range body {
+		if strings.HasPrefix(key, "@odata.") {
+			continue
+		}
+		resource[key] = value
+	}
+	resource["Id"] = id
+	return resource
+}
+
+// --- Storage ---------------------------------------------------------------
+//
+// The writer here is NucRedfishSyncDxe, not RedfishClientPkg: edk2-redfish-client
+// has no Storage feature driver at all, and its only data source (HII setup
+// questions) could never carry drive inventory. Nor can the host lean on SMBIOS
+// the way the Memory branch does -- DSP0134 defines no structure type for a
+// disk -- so the firmware reads the drives off its own boot-services stack
+// (DiskInfo / NVMe pass-thru) and POSTs one Drive per device, keyed on serial
+// number.
+//
+// Strictly, Drives is a property array on Storage rather than a collection, so
+// a POST to it is this host interface's own contract (mirroring Memory), not
+// standard Redfish -- standard Redfish has no client-creatable drives at all.
+
+func redfishStorageMatches(c *gin.Context) bool {
+	if c.Param("storage") == redfishStorageID {
+		return true
+	}
+	redfishError(c, http.StatusNotFound, "Storage subsystem not found")
+	return false
+}
+
+func handleRedfishStorageCollection(c *gin.Context) {
+	if !redfishSystemMatches(c) {
+		return
+	}
+
+	redfishJSON(c, gin.H{
+		"@odata.type":         "#StorageCollection.StorageCollection",
+		"@odata.id":           redfishStorageRootURI,
+		"Name":                "Storage Collection",
+		"Members@odata.count": 1,
+		"Members": []gin.H{
+			{"@odata.id": redfishStorageURI},
+		},
+	})
+}
+
+func handleRedfishStorage(c *gin.Context) {
+	if !redfishSystemMatches(c) || !redfishStorageMatches(c) {
+		return
+	}
+
+	redfishClient.mu.RLock()
+	ids := redfishSortedKeys(redfishClient.Drives)
+	redfishClient.mu.RUnlock()
+
+	drives := make([]gin.H, 0, len(ids))
+	for _, id := range ids {
+		drives = append(drives, gin.H{"@odata.id": redfishDrivesURI + "/" + id})
+	}
+
+	redfishJSON(c, gin.H{
+		"@odata.type":        "#Storage.v1_5_0.Storage",
+		"@odata.id":          redfishStorageURI,
+		"Id":                 redfishStorageID,
+		"Name":               "Local Storage",
+		"Status":             gin.H{"State": "Enabled", "Health": "OK"},
+		"Drives@odata.count": len(drives),
+		"Drives":             drives,
+	})
+}
+
+func handleRedfishDriveCreate(c *gin.Context) {
+	if !redfishSystemMatches(c) || !redfishStorageMatches(c) || !redfishHostWritable(c) {
+		return
+	}
+
+	body, err := redfishBindResource(c)
+	if err != nil {
+		return
+	}
+
+	redfishClient.mu.Lock()
+	// The serial number is the natural key: it is what makes re-reporting the
+	// same drive on every boot an update rather than an accumulation.
+	id := redfishResourceID(body, "SerialNumber")
+	if id == "" {
+		id = redfishAllocateID(redfishClient.Drives)
+	}
+	redfishClient.Drives[id] = body
+	count := len(redfishClient.Drives)
+	redfishClient.mu.Unlock()
+
+	redfishLogger.Info().
+		Str("id", id).
+		Str("model", redfishString(body, "Model")).
+		Int("total", count).
+		Msg("host reported a drive")
+
+	c.Header("Location", redfishDrivesURI+"/"+id)
+	c.JSON(http.StatusCreated, redfishDriveResource(id, body))
+}
+
+func handleRedfishDrive(c *gin.Context) {
+	if !redfishSystemMatches(c) || !redfishStorageMatches(c) {
+		return
+	}
+
+	id := c.Param("drive")
+	redfishClient.mu.RLock()
+	body, ok := redfishClient.Drives[id]
+	body = redfishCopyMap(body)
+	redfishClient.mu.RUnlock()
+
+	if !ok {
+		redfishError(c, http.StatusNotFound, "Drive not found")
+		return
+	}
+	redfishJSON(c, redfishDriveResource(id, body))
+}
+
+func handleRedfishDrivePatch(c *gin.Context) {
+	if !redfishSystemMatches(c) || !redfishStorageMatches(c) || !redfishHostWritable(c) {
+		return
+	}
+
+	id := c.Param("drive")
+	redfishClient.mu.RLock()
+	existing, ok := redfishClient.Drives[id]
+	existing = redfishCopyMap(existing)
+	redfishClient.mu.RUnlock()
+
+	if !ok {
+		redfishError(c, http.StatusNotFound, "Drive not found")
+		return
+	}
+	if !redfishCheckIfMatch(c, redfishDriveResource(id, existing)) {
+		return
+	}
+
+	patch, err := redfishBindResource(c)
+	if err != nil {
+		return
+	}
+
+	redfishClient.mu.Lock()
+	for key, value := range patch {
+		redfishClient.Drives[id][key] = value
+	}
+	merged := redfishCopyMap(redfishClient.Drives[id])
+	redfishClient.mu.Unlock()
+
+	redfishJSON(c, redfishDriveResource(id, merged))
+}
+
+func redfishDriveResource(id string, body map[string]any) gin.H {
+	resource := gin.H{
+		"@odata.type": "#Drive.v1_4_0.Drive",
+		"@odata.id":   redfishDrivesURI + "/" + id,
+		"Id":          id,
+		"Name":        "Drive",
 	}
 	for key, value := range body {
 		if strings.HasPrefix(key, "@odata.") {

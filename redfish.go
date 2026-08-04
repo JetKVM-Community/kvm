@@ -101,6 +101,11 @@ func registerRedfishRoutes(r *gin.Engine) {
 		v1.GET("/Chassis/:id", handleRedfishChassis)
 		v1.GET("/SessionService", handleRedfishSessionService)
 		v1.GET("/SessionService/Sessions", handleRedfishSessions)
+
+		// The tree the host firmware's own Redfish client walks. Separate file
+		// because it is a different conversation: there the host writes and an
+		// operator reads, which is the opposite of everything above.
+		registerRedfishClientRoutes(v1)
 	}
 }
 
@@ -276,7 +281,7 @@ func redfishAuthMiddleware() gin.HandlerFunc {
 }
 
 func handleRedfishServiceRoot(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
+	redfishJSON(c, gin.H{
 		"@odata.type":    "#ServiceRoot.v1_5_0.ServiceRoot",
 		"@odata.id":      "/redfish/v1/",
 		"@odata.context": "/redfish/v1/$metadata#ServiceRoot.ServiceRoot",
@@ -290,6 +295,27 @@ func handleRedfishServiceRoot(c *gin.Context) {
 		"Managers":       gin.H{"@odata.id": "/redfish/v1/Managers"},
 		"Chassis":        gin.H{"@odata.id": "/redfish/v1/Chassis"},
 		"SessionService": gin.H{"@odata.id": "/redfish/v1/SessionService"},
+		// RedfishTaskServiceDxe and BiosAttributeRegistryDxe start from these
+		// two; a service root without them is where their walk ends.
+		"Tasks":      gin.H{"@odata.id": redfishTaskServiceURI},
+		"Registries": gin.H{"@odata.id": redfishRegistriesURI},
+		// Declared explicitly because the default when it is absent is "assume
+		// nothing", and RedfishProtocolFeaturesLib then avoids $expand -- which
+		// costs the host one HTTP round trip per collection member over a link
+		// it is walking during boot.
+		"ProtocolFeaturesSupported": gin.H{
+			"ExpandQuery": gin.H{
+				"ExpandAll": false,
+				"Levels":    false,
+				"Links":     false,
+				"NoLinks":   false,
+			},
+			"FilterQuery":     false,
+			"OnlyMemberQuery": false,
+			"SelectQuery":     false,
+			"ExcerptQuery":    false,
+			"DeepOperations":  gin.H{"DeepPATCH": false, "DeepPOST": false},
+		},
 		"Links": gin.H{
 			"Sessions": gin.H{"@odata.id": "/redfish/v1/SessionService/Sessions"},
 		},
@@ -314,7 +340,7 @@ func handleRedfishSystem(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, redfishSystemResource())
+	redfishJSON(c, redfishSystemResource())
 }
 
 // redfishSystemResource renders the ComputerSystem. Identity fields are whatever
@@ -340,7 +366,16 @@ func redfishSystemResource() gin.H {
 			"BootSourceOverrideTarget":                         host.BootOverrideTarget,
 			"BootSourceOverrideEnabled":                        host.BootOverrideEnabled,
 			"BootSourceOverrideTarget@Redfish.AllowableValues": redfishBootOverrideTargets,
+			// The host's real boot menu, as opposed to the four enums above.
+			// BootOptionCollectionDxe populates it.
+			"BootOptions": gin.H{"@odata.id": redfishBootOptionsURI},
 		},
+		// Sub-resources the firmware's feature drivers descend into. Each is a
+		// separate driver in RedfishClientPkg and each gives up if its link is
+		// missing from here, so these are load-bearing rather than decorative.
+		"Bios":       gin.H{"@odata.id": redfishBiosURI},
+		"SecureBoot": gin.H{"@odata.id": redfishSecureBootURI},
+		"Memory":     gin.H{"@odata.id": redfishMemoryURI},
 	}
 
 	// Manufacturer defaults to the BMC vendor only while the host is silent;
@@ -471,6 +506,13 @@ func redfishValidBootTarget(target string) bool {
 func handleRedfishSystemPatch(c *gin.Context) {
 	if c.Param("id") != redfishSystemID {
 		redfishError(c, http.StatusNotFound, "System not found")
+		return
+	}
+
+	// RedfishETagDxe round-trips the ETag it saw on the last GET and sends it
+	// back here, which is what stops the host overwriting a boot override an
+	// operator staged in between.
+	if !redfishCheckIfMatch(c, redfishSystemResource()) {
 		return
 	}
 

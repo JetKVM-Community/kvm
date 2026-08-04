@@ -333,3 +333,88 @@ func TestRedfishStaleIfMatchIsRejected(t *testing.T) {
 		t.Fatalf("PATCH with a stale If-Match = %d, want 412", w.Code)
 	}
 }
+
+// POST to a Redfish collection means "create this and tell me where you put
+// it": the service owns the Id. Memory has no natural key the client can
+// supply, and demanding one made every MemoryDxe create fail with 400 -- which
+// the firmware reported four hops away as "cannot find new location".
+func TestRedfishMemoryPostWithoutAnIdIsAccepted(t *testing.T) {
+	r := redfishTestRouter(t)
+
+	t.Cleanup(func() {
+		redfishClient.mu.Lock()
+		redfishClient.Memory = map[string]map[string]any{}
+		redfishClient.mu.Unlock()
+	})
+
+	body := `{"CapacityMiB":8192,"MemoryLocation":{"Socket":0,"Slot":1},"MemoryType":"DRAM"}`
+	req := httptest.NewRequest(http.MethodPost, "/redfish/v1/Systems/1/Memory", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "169.254.10.2:1024"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST Memory without an Id = %d, want 201 (%s)", w.Code, w.Body.String())
+	}
+
+	location := w.Header().Get("Location")
+	if location == "" {
+		t.Fatal("201 carried no Location; the client reads the new URI from it")
+	}
+
+	// The Location must actually resolve -- that is the whole point of it.
+	req = httptest.NewRequest(http.MethodGet, location, nil)
+	req.RemoteAddr = "169.254.10.2:1024"
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET the Location %q = %d, want 200", location, w.Code)
+	}
+
+	var member map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &member); err != nil {
+		t.Fatalf("member body: %v", err)
+	}
+	if got := member["CapacityMiB"]; got != float64(8192) {
+		t.Errorf("CapacityMiB = %v, want 8192", got)
+	}
+}
+
+// Two POSTs with no Id must land on different members rather than overwriting.
+func TestRedfishMemoryPostsAllocateDistinctIds(t *testing.T) {
+	r := redfishTestRouter(t)
+
+	t.Cleanup(func() {
+		redfishClient.mu.Lock()
+		redfishClient.Memory = map[string]map[string]any{}
+		redfishClient.mu.Unlock()
+	})
+
+	seen := map[string]bool{}
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/redfish/v1/Systems/1/Memory",
+			strings.NewReader(`{"CapacityMiB":4096}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "169.254.10.2:1024"
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("POST %d = %d, want 201", i, w.Code)
+		}
+		location := w.Header().Get("Location")
+		if seen[location] {
+			t.Fatalf("POST %d reused Location %q", i, location)
+		}
+		seen[location] = true
+	}
+
+	code, body := redfishGetJSON(t, r, "/redfish/v1/Systems/1/Memory")
+	if code != http.StatusOK {
+		t.Fatalf("GET Memory = %d", code)
+	}
+	if got := body["Members@odata.count"]; got != float64(3) {
+		t.Errorf("Members@odata.count = %v, want 3", got)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -492,13 +493,14 @@ func handleRedfishBootOptionCreate(c *gin.Context) {
 		return
 	}
 
+	redfishClient.mu.Lock()
+	// BootOptionReference ("Boot0001") is a real natural key and the client does
+	// send it, so prefer it; fall back to a service-assigned Id rather than
+	// refusing the create, per POST semantics.
 	id := redfishResourceID(body, "BootOptionReference")
 	if id == "" {
-		redfishError(c, http.StatusBadRequest, "Id or BootOptionReference is required")
-		return
+		id = redfishAllocateID(redfishClient.BootOptions)
 	}
-
-	redfishClient.mu.Lock()
 	redfishClient.BootOptions[id] = body
 	count := len(redfishClient.BootOptions)
 	redfishClient.mu.Unlock()
@@ -637,13 +639,15 @@ func handleRedfishMemoryCreate(c *gin.Context) {
 		return
 	}
 
-	id := redfishResourceID(body, "MemoryLocation")
-	if id == "" {
-		redfishError(c, http.StatusBadRequest, "Id is required")
-		return
-	}
-
 	redfishClient.mu.Lock()
+	// No natural key here: Memory has no equivalent of BootOptionReference, and
+	// MemoryLocation is an object (socket/channel/slot), not a string. So the
+	// service assigns the Id -- which is what POST-to-a-collection means in
+	// Redfish, and why the client goes looking for it in the Location header.
+	id := redfishResourceID(body, "DeviceLocator")
+	if id == "" {
+		id = redfishAllocateID(redfishClient.Memory)
+	}
 	redfishClient.Memory[id] = body
 	count := len(redfishClient.Memory)
 	redfishClient.mu.Unlock()
@@ -797,6 +801,26 @@ func redfishResourceID(body map[string]any, fallbackKey string) string {
 		return redfishSanitiseID(id)
 	}
 	return ""
+}
+
+// redfishAllocateID assigns the lowest unused ordinal Id in a collection.
+//
+// POST to a Redfish collection means "create this and tell me where you put
+// it": the *service* owns the Id and reports it in the Location header. Only
+// some schemas carry a natural key the client can supply (BootOption has
+// BootOptionReference); Memory has none, and demanding one made every
+// MemoryDxe create fail with 400, which the client reported four hops away as
+//
+//	ProvisioningMemoryResource: cannot find new location: Not Found
+//
+// Caller holds the write lock.
+func redfishAllocateID[V any](existing map[string]V) string {
+	for i := 1; ; i++ {
+		id := strconv.Itoa(i)
+		if _, taken := existing[id]; !taken {
+			return id
+		}
+	}
 }
 
 // redfishSanitiseID keeps a client-supplied Id from escaping its collection.

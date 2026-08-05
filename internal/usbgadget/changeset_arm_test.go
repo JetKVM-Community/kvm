@@ -4,6 +4,7 @@ package usbgadget
 
 import (
 	"os"
+	"path"
 	"strings"
 	"testing"
 
@@ -80,8 +81,69 @@ func TestUsbGadgetInit(t *testing.T) {
 	assert.NotNil(usbGadget)
 }
 
+// removeGadget tears a gadget out of configfs.
+//
+// These tests run on the real device against the real /sys/kernel/config, so a
+// gadget they create is a gadget that outlives them. A stray
+// /sys/kernel/config/usb_gadget/test left behind after a test run is not inert:
+// it is a second gadget competing for the one UDC this board has, and it turns
+// up later as a device in a state nobody configured.
+//
+// configfs teardown order is strict and silently no-ops if you get it wrong:
+// unlink the functions from the config first, then the config, then the
+// functions, then the strings, and only then the gadget directory.
+func removeGadget(name string) {
+	g := path.Join(gadgetPath, name)
+	if _, err := os.Stat(g); err != nil {
+		return
+	}
+
+	// Unbind from the UDC before dismantling anything.
+	_ = os.WriteFile(path.Join(g, "UDC"), []byte("\n"), 0o644)
+
+	configs, _ := os.ReadDir(path.Join(g, "configs"))
+	for _, c := range configs {
+		cPath := path.Join(g, "configs", c.Name())
+		entries, _ := os.ReadDir(cPath)
+		for _, e := range entries {
+			// Function links only; leave MaxPower/bmAttributes alone.
+			if e.Type()&os.ModeSymlink != 0 {
+				_ = os.Remove(path.Join(cPath, e.Name()))
+			}
+		}
+		strs, _ := os.ReadDir(path.Join(cPath, "strings"))
+		for _, s := range strs {
+			_ = os.Remove(path.Join(cPath, "strings", s.Name()))
+		}
+		_ = os.Remove(cPath)
+	}
+
+	funcs, _ := os.ReadDir(path.Join(g, "functions"))
+	for _, f := range funcs {
+		_ = os.Remove(path.Join(g, "functions", f.Name()))
+	}
+
+	strs, _ := os.ReadDir(path.Join(g, "strings"))
+	for _, s := range strs {
+		_ = os.Remove(path.Join(g, "strings", s.Name()))
+	}
+
+	_ = os.Remove(g)
+}
+
 func TestUsbGadgetStrictModeInitFail(t *testing.T) {
+	// strictMode lives on a package-level config shared by every test here, so
+	// restore it: leaving it on made the outcome of later tests depend on run
+	// order.
+	prev := usbConfig.strictMode
 	usbConfig.strictMode = true
+	t.Cleanup(func() {
+		usbConfig.strictMode = prev
+		// NewUsbGadget creates the configfs directories before it fails, so
+		// there is something to remove even though it returned nil.
+		removeGadget("test")
+	})
+
 	u := NewUsbGadget("test", usbDevices, usbConfig, nil)
 	assert.Nil(t, u, "should be nil")
 }

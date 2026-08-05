@@ -248,6 +248,23 @@ func setupRouter() *gin.Engine {
 
 	// Catch-all route for SPA
 	r.NoRoute(func(c *gin.Context) {
+		// Anything under /redfish must answer as Redfish, never as the web UI.
+		//
+		// The SPA fallback below returns index.html with 200 for any path a
+		// browser would accept HTML for, and a Redfish client's Accept header
+		// is permissive enough to qualify. So an unimplemented resource came
+		// back as "200 OK" with a page of HTML, and the client's parser --
+		// not its error path -- got to decide what that meant.
+		//
+		// This is not hypothetical: it is why RedfishTaskServiceDxe reported
+		// "Device Error" instead of a 404 when the BMC had no TaskService, and
+		// why the gap took so long to find. A 404 with a Redfish error body is
+		// what a client can actually act on.
+		if strings.HasPrefix(c.Request.URL.Path, "/redfish") {
+			redfishError(c, http.StatusNotFound, "Resource not found")
+			return
+		}
+
 		if c.Request.Method == "GET" && c.NegotiateFormat(gin.MIMEHTML) == gin.MIMEHTML {
 			c.FileFromFS("/", http.FS(staticFS))
 			return

@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/bougou/go-ipmi/pkg/bmc"
 	"github.com/bougou/go-ipmi/pkg/hal"
+	"github.com/bougou/go-ipmi/pkg/handlers"
 	"github.com/bougou/go-ipmi/pkg/server"
 	"github.com/bougou/go-ipmi/pkg/transport/udp"
 	"github.com/bougou/go-ipmi/pkg/types"
@@ -53,18 +53,27 @@ import (
 // the proper completion code, so each of those degrades into an honest "not
 // supported" rather than a fabricated answer.
 
+// None of these are configurable, deliberately. This device has exactly one
+// account -- the device password shared with the web UI and Redfish -- and
+// IPMI is a third view of it, not a separate service to administer. A
+// configurable port or username would be a second identity to keep in sync,
+// and the standard values are what every IPMI client assumes anyway.
 const (
-	// ipmiDefaultPort is the RMCP port assigned by IANA. Configurable mainly so
-	// a second BMC can be tested on one host.
-	ipmiDefaultPort = 623
+	// ipmiPort is the RMCP port assigned by IANA, where every client looks.
+	ipmiPort = 623
 
-	// ipmiUserSlot is the IPMI user slot the configured account occupies. Slot 1
-	// is reserved for the anonymous/null user, so the first usable slot is 2.
+	// ipmiUserSlot is the IPMI user slot the account occupies. Slot 1 is
+	// reserved for the anonymous/null user, so the first usable slot is 2.
 	ipmiUserSlot = 2
 
 	// ipmiChannel is the LAN channel number this BMC serves. Channel 1 is the
 	// conventional first LAN channel and what ipmitool assumes by default.
 	ipmiChannel = 1
+
+	// ipmiUsername is the account name RAKP matches on. Web and Redfish accept
+	// any name and check only the device password; IPMI cannot -- RAKP keys on
+	// the name -- so the one shared account needs a fixed one here.
+	ipmiUsername = "admin"
 )
 
 // ipmiCipherSuites are the RMCP+ cipher suites this BMC will negotiate:
@@ -86,8 +95,8 @@ var (
 )
 
 // initIPMI starts the IPMI server when it is enabled in config. It is off by
-// default: see the credential note on Config.IPMIPassword for why enabling it
-// is a decision rather than a default.
+// default: see the credential note on Config.EncryptedPassword and the header
+// of credentials.go for why enabling it is a decision rather than a default.
 func initIPMI() error {
 	// BMC mode is the precondition: without it the USB functions IPMI manages
 	// over are not guaranteed to be present, and a listener that answers but
@@ -101,27 +110,38 @@ func initIPMI() error {
 		return nil
 	}
 
-	if config.IPMIUsername == "" || config.IPMIPassword == "" {
-		return fmt.Errorf("IPMI is enabled but no username/password is set")
+	// The device password, shared with the web UI and Redfish. RAKP needs the
+	// bytes rather than a hash, which is why credentials.go stores a sealed
+	// copy alongside the bcrypt one; refuse to start rather than fall back to
+	// anything weaker.
+	password, err := sharedPasswordForIPMI()
+	if err != nil {
+		return fmt.Errorf("IPMI credential unavailable: %w", err)
 	}
 
-	port := config.IPMIPort
-	if port == 0 {
-		port = ipmiDefaultPort
-	}
-
-	b, err := newIPMIBMC(config.IPMIUsername, config.IPMIPassword)
+	b, err := newIPMIBMC(ipmiUsername, password)
 	if err != nil {
 		return fmt.Errorf("build BMC: %w", err)
 	}
 
-	addr := fmt.Sprintf(":%d", port)
+	addr := fmt.Sprintf(":%d", ipmiPort)
 	conn, err := udp.Listen(addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 
-	srv := server.NewServer(b, conn,
+	// NewServer builds its own registry and offers no way to add to it after the
+	// fact, so the standard handlers are registered here and the SOL payload
+	// commands alongside them.
+	reg := handlers.NewRegistry()
+	handlers.RegisterAppHandlers(reg)
+	handlers.RegisterSessionHandlers(reg)
+	handlers.RegisterChassisHandlers(reg)
+	handlers.RegisterStorageHandlers(reg)
+	solRegisterHandlers(reg)
+
+	srv := server.NewServer(b, newSOLConn(conn, b),
+		server.WithHandlerRegistry(reg),
 		server.WithCipherSuites(ipmiCipherSuites),
 		// IPMI v1.5 sessions authenticate with a straight MD5 (or worse, MD2,
 		// plaintext, or none) over the password. RMCP+ is not strong, but v1.5
@@ -137,8 +157,8 @@ func initIPMI() error {
 	go func() {
 		defer conn.Close()
 		ipmiLogger.Info().
-			Int("port", port).
-			Str("user", config.IPMIUsername).
+			Int("port", ipmiPort).
+			Str("user", ipmiUsername).
 			Msg("IPMI server listening")
 		if err := srv.Serve(context.Background()); err != nil && !errors.Is(err, context.Canceled) {
 			ipmiLogger.Error().Err(err).Msg("IPMI server stopped")
@@ -154,6 +174,11 @@ func stopIPMI() {
 	srv := ipmiServer
 	ipmiServer = nil
 	ipmiServerMu.Unlock()
+
+	// Before closing the socket: an active console still holds a subscription to
+	// the serial broker, and the broker only closes the tty when the last
+	// subscriber leaves.
+	solShutdown()
 
 	if srv != nil {
 		srv.Close()
@@ -503,27 +528,12 @@ func (f *jetkvmFRUStore) DeviceIDs(_ context.Context) ([]uint8, error) {
 
 // validateIPMIConfig reports why an IPMI configuration would be refused, so the
 // caller can reject it at the point of change rather than at the next restart.
+// The enable bit is the whole IPMI configuration -- port, channel and username
+// are fixed (see the constants above) -- so the one thing left to check is that
+// the shared credential exists.
 func validateIPMIConfig(c *Config) error {
-	if !c.IPMIEnabled {
-		return nil
-	}
-	if strings.TrimSpace(c.IPMIUsername) == "" {
-		return fmt.Errorf("IPMI username is required when IPMI is enabled")
-	}
-	// IPMI truncates both at 16 bytes at the protocol level (v2.0 Table 22-34);
-	// accepting longer and silently cutting them would let someone set a
-	// password they can never type back.
-	if len(c.IPMIUsername) > 16 {
-		return fmt.Errorf("IPMI username must be at most 16 characters")
-	}
-	if len(c.IPMIPassword) < 8 {
-		return fmt.Errorf("IPMI password must be at least 8 characters")
-	}
-	if len(c.IPMIPassword) > 20 {
-		return fmt.Errorf("IPMI password must be at most 20 characters")
-	}
-	if c.IPMIPort < 0 || c.IPMIPort > 65535 {
-		return fmt.Errorf("IPMI port must be between 0 and 65535")
+	if c.IPMIEnabled && c.EncryptedPassword == "" {
+		return fmt.Errorf("IPMI requires a device password; set one with Board Management Controller mode enabled")
 	}
 	return nil
 }

@@ -274,10 +274,8 @@ func TestIPMIHALReportsAbsentSubsystemsAsNil(t *testing.T) {
 func TestValidateIPMIConfig(t *testing.T) {
 	base := func() *Config {
 		return &Config{
-			IPMIEnabled:  true,
-			IPMIPort:     623,
-			IPMIUsername: "admin",
-			IPMIPassword: "correct-horse",
+			IPMIEnabled:       true,
+			EncryptedPassword: "sealed",
 		}
 	}
 
@@ -287,12 +285,8 @@ func TestValidateIPMIConfig(t *testing.T) {
 		wantErr bool
 	}{
 		{"valid", func(*Config) {}, false},
-		{"disabled skips validation", func(c *Config) { c.IPMIEnabled = false; c.IPMIUsername = "" }, false},
-		{"no username", func(c *Config) { c.IPMIUsername = "" }, true},
-		{"username too long", func(c *Config) { c.IPMIUsername = "seventeen_chars_x" }, true},
-		{"password too short", func(c *Config) { c.IPMIPassword = "short" }, true},
-		{"password too long", func(c *Config) { c.IPMIPassword = "twenty-one-characters" }, true},
-		{"port out of range", func(c *Config) { c.IPMIPort = 70000 }, true},
+		{"disabled skips validation", func(c *Config) { c.IPMIEnabled = false; c.EncryptedPassword = "" }, false},
+		{"no stored credential", func(c *Config) { c.EncryptedPassword = "" }, true},
 	}
 
 	for _, tt := range tests {
@@ -314,11 +308,8 @@ func TestIPMIIsDisabledByDefault(t *testing.T) {
 	if c.IPMIEnabled {
 		t.Error("IPMI is enabled by default")
 	}
-	if c.IPMIUsername != "" || c.IPMIPassword != "" {
-		t.Error("a default IPMI credential is set")
-	}
-	if c.IPMIPort != ipmiDefaultPort {
-		t.Errorf("default port = %d, want %d", c.IPMIPort, ipmiDefaultPort)
+	if c.EncryptedPassword != "" {
+		t.Error("a reversible credential exists by default")
 	}
 }
 

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // Minimal DMTF Redfish (https://www.dmtf.org/standards/redfish) surface for
@@ -297,7 +296,10 @@ func redfishAuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		if err := bcrypt.CompareHashAndPassword([]byte(config.HashedPassword), []byte(password)); err != nil {
+		// verifyPassword rather than bcrypt directly: the host's firmware makes
+		// dozens of authenticated requests per boot, and bcrypt's ~50-100ms is
+		// the wrong cost to pay on each one. Same semantics, successes memoised.
+		if !verifyPassword(password) {
 			c.Header("WWW-Authenticate", `Basic realm="JetKVM Redfish"`)
 			redfishError(c, http.StatusUnauthorized, "Invalid credentials")
 			c.Abort()

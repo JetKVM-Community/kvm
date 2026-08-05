@@ -138,23 +138,27 @@ type Config struct {
 	BmcEnabled bool `json:"bmc_enabled"`
 
 	// IPMI 2.0 over RMCP+ (see ipmi.go). Requires BmcEnabled. Off by default,
-	// and worth leaving off unless something actually needs it.
+	// and worth leaving off unless something actually needs it: RAKP hands an
+	// HMAC of the password to anyone who asks for a session, without
+	// authenticating them first, which makes it offline crackable. That is a
+	// property of the protocol rather than of this implementation and cannot
+	// be fixed here.
 	//
-	// IPMIPassword is stored in the clear, and cannot be anything else: RMCP+
-	// authenticates by having both ends compute an HMAC over the password
-	// itself (v2.0 RAKP), so the BMC needs the original bytes on every session
-	// open. It is a distinct credential from HashedPassword on purpose --
-	// enabling IPMI must not put the web UI's password on disk in plaintext.
+	// This bit is the whole IPMI configuration surface. Port (623), channel
+	// (1) and username ("admin") are fixed in ipmi.go, and the credential is
+	// the device password web and Redfish already check (EncryptedPassword
+	// below) -- IPMI is a third view of the one shared account, not a second
+	// service to administer.
+	IPMIEnabled bool `json:"ipmi_enabled"`
+
+	// EncryptedPassword is the device password sealed for IPMI's use (see
+	// credentials.go). It is the same password as HashedPassword, stored a
+	// second way because RAKP needs the bytes back and bcrypt cannot give them.
 	//
-	// Note also that RAKP hands an HMAC of that password to anyone who asks for
-	// a session, without authenticating them first, which makes it offline
-	// crackable. That is a property of the protocol rather than of this
-	// implementation and cannot be fixed here; it is the reason the default is
-	// off and the reason to prefer a long random value.
-	IPMIEnabled  bool   `json:"ipmi_enabled"`
-	IPMIPort     int    `json:"ipmi_port"`
-	IPMIUsername string `json:"ipmi_username"`
-	IPMIPassword string `json:"ipmi_password"`
+	// Written only while BMC mode is on, and erased when it is turned off, so a
+	// device that is not managing a host carries no reversible copy of its own
+	// password.
+	EncryptedPassword string `json:"encrypted_password,omitempty"`
 
 	// A boot override staged for the managed host, over either Redfish or IPMI.
 	//
@@ -260,7 +264,6 @@ func getDefaultConfig() Config {
 		AutoUpdateEnabled: true, // Set a default value
 		ActiveExtension:   "",
 		IPMIEnabled:       false,
-		IPMIPort:          ipmiDefaultPort,
 		// No override staged. These mirror the Redfish vocabulary because that
 		// is what the host firmware reads; the IPMI side translates.
 		HostBootOverrideTarget:  "None",

@@ -238,38 +238,52 @@ fi
 
 if [ "$RUN_GO_TESTS" = true ]; then
     msg_info "▶ Building go tests"
-    make build_dev_test
+    # do_make, not make: the test binaries are cross-compiled for the device and
+    # the cgo-linked ones need the buildkit toolchain. Building them on the host
+    # silently produces no binary for those packages -- the run then fails with
+    # "fork/exec ./<pkg>_test: no such file" while every pure-Go package passes,
+    # which reads as a harness hiccup rather than "these tests never ran".
+    do_make build_dev_test
 
     msg_info "▶ Copying device-tests.tar.gz to remote host"
-    sshdev "cat > /tmp/device-tests.tar.gz" < device-tests.tar.gz
+    # /userdata, not /tmp: /tmp is a ~100 MB tmpfs and the test payload does not
+    # fit in it once the cgo-linked package binaries are included. Landing there
+    # fails with "tar: write error: No space left on device" after the build has
+    # already succeeded.
+    sshdev "cat > /userdata/device-tests.tar.gz" < device-tests.tar.gz
 
     msg_info "▶ Running go tests"
     sshdev ash << 'EOF'
 set -e
-TMP_DIR=$(mktemp -d)
+# Both gotestsum and the package test binaries are cgo-linked against the
+# Rockchip runtime, and a non-interactive ssh shell does not source
+# /etc/profile.d/RkEnv.sh. Without this they die with
+# "can't load library 'librockit.so'" before a single test runs.
+export LD_LIBRARY_PATH=/oem/usr/lib:$LD_LIBRARY_PATH
+TMP_DIR=$(mktemp -d -p /userdata)
 cd ${TMP_DIR}
-tar zxf /tmp/device-tests.tar.gz
+tar zxf /userdata/device-tests.tar.gz
 ./gotestsum --format=testdox \
-    --jsonfile=/tmp/device-tests.json \
-    --post-run-command 'sh -c "echo $TESTS_FAILED > /tmp/device-tests.failed"' \
+    --jsonfile=/userdata/device-tests.json \
+    --post-run-command 'sh -c "echo $TESTS_FAILED > /userdata/device-tests.failed"' \
     --raw-command -- ./run_all_tests -json
 
 GOTESTSUM_EXIT_CODE=$?
 if [ $GOTESTSUM_EXIT_CODE -ne 0 ]; then
     echo "❌ Tests failed (exit code: $GOTESTSUM_EXIT_CODE)"
-    rm -rf ${TMP_DIR} /tmp/device-tests.tar.gz
+    rm -rf ${TMP_DIR} /userdata/device-tests.tar.gz
     exit 1
 fi
 
-TESTS_FAILED=$(cat /tmp/device-tests.failed)
+TESTS_FAILED=$(cat /userdata/device-tests.failed)
 if [ "$TESTS_FAILED" -ne 0 ]; then
     echo "❌ Tests failed $TESTS_FAILED tests failed"
-    rm -rf ${TMP_DIR} /tmp/device-tests.tar.gz
+    rm -rf ${TMP_DIR} /userdata/device-tests.tar.gz
     exit 1
 fi
 
 echo "✅ Tests passed"
-rm -rf ${TMP_DIR} /tmp/device-tests.tar.gz
+rm -rf ${TMP_DIR} /userdata/device-tests.tar.gz
 EOF
 
     if [ "$RUN_GO_TESTS_ONLY" = true ]; then

@@ -236,7 +236,15 @@ func setupRouter() *gin.Engine {
 		protected.POST("/jsonrpc", handleJSONRPCHttp)
 	}
 
-	// Redfish power-control endpoints (own Basic-auth group)
+	// Redfish endpoints (own Basic-auth group), gated on BMC mode.
+	//
+	// Registered unconditionally and refused per-request rather than omitted
+	// from the router: with the routes absent, gin's SPA catch-all answers
+	// /redfish/v1/ with index.html and a 200, so a client sees a Redfish service
+	// that returns HTML. A 404 from a route that exists is the honest answer,
+	// and it is the difference between "management is off" and "this BMC is
+	// broken" -- a distinction the host firmware's own logs turned on earlier in
+	// this stack's history.
 	registerRedfishRoutes(r)
 
 	// Catch-all route for SPA

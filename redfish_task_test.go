@@ -164,9 +164,7 @@ func redfishTaskRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
-	orig := config
-	t.Cleanup(func() { config = orig })
-	config.LocalAuthMode = "noPassword"
+	withTestConfig(t).LocalAuthMode = "noPassword"
 
 	r := gin.New()
 	v1 := r.Group("/redfish/v1")
@@ -287,10 +285,9 @@ func TestRedfishResetRejectsUnsupportedTypeWithoutATask(t *testing.T) {
 	redfishTaskTestService(t)
 	gin.SetMode(gin.TestMode)
 
-	orig := config
-	t.Cleanup(func() { config = orig })
-	config.LocalAuthMode = "noPassword"
-	config.ActiveExtension = "dc-power"
+	cfg := withTestConfig(t)
+	cfg.LocalAuthMode = "noPassword"
+	cfg.ActiveExtension = "dc-power"
 
 	r := gin.New()
 	v1 := r.Group("/redfish/v1")

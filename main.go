@@ -104,6 +104,26 @@ func Main() {
 		logger.Error().Err(err).Msg("failed to initialize mDNS")
 	}
 
+	// Restore the host inventory and any staged boot override before either
+	// Redfish or IPMI is reachable, so no client observes the gap.
+	bmcStateLoad()
+	redfishRestoreBootOverride()
+	// A config edited by hand must not leave the device claiming to be a BMC
+	// while missing the USB functions it manages over.
+	if err := applyBmcUsbDevices(); err != nil {
+		logger.Error().Err(err).Msg("failed to apply the BMC USB function set")
+	}
+	defer bmcStateFlush()
+
+	// Initialize IPMI. A failure here leaves the rest of the BMC running: an
+	// out-of-band protocol that will not start is worth reporting, but it is
+	// not a reason to take the web UI and video down with it.
+	setProcTitle("initIPMI")
+	if err := initIPMI(); err != nil {
+		logger.Error().Err(err).Msg("failed to initialize IPMI")
+	}
+	defer stopIPMI()
+
 	setProcTitle("initPrometheus")
 	initPrometheus()
 	if err := setInitialVirtualMediaState(); err != nil {

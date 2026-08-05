@@ -33,6 +33,7 @@ var (
 	usbLogger       = logging.GetSubsystemLogger("usb")
 	tailscaleLogger = logging.GetSubsystemLogger("tailscale")
 	redfishLogger   = logging.GetSubsystemLogger("redfish")
+	ipmiLogger      = logging.GetSubsystemLogger("ipmi")
 	// external components
 	ginLogger = logging.GetSubsystemLogger("gin")
 )

@@ -68,6 +68,19 @@ const usbPresets = [
     },
   },
   {
+    label: m.usb_device_board_management_controller(),
+    value: "bmc",
+    config: {
+      keyboard: true,
+      absolute_mouse: true,
+      relative_mouse: true,
+      mass_storage: true,
+      serial_console: true,
+      ethernet: true,
+      audio: false,
+    },
+  },
+  {
     label: m.usb_device_custom(),
     value: "custom",
   },
@@ -80,6 +93,16 @@ export function UsbDeviceSetting() {
 
   const [usbDeviceConfig, setUsbDeviceConfig] = useState<UsbDeviceConfig>(defaultUsbDeviceConfig);
   const [selectedPreset, setSelectedPreset] = useState<string>("default");
+  // Board Management Controller mode pins the function set Redfish and IPMI
+  // run over, so the editor is read-only until BMC mode is turned off.
+  const [usbClassesLocked, setUsbClassesLocked] = useState(false);
+
+  const syncUsbClassesLocked = useCallback(() => {
+    send("getUsbDevicesLocked", {}, (resp: JsonRpcResponse) => {
+      if ("error" in resp) return;
+      setUsbClassesLocked(Boolean(resp.result));
+    });
+  }, [send]);
 
   const syncUsbDeviceConfig = useCallback(() => {
     send("getUsbDevices", {}, (resp: JsonRpcResponse) => {
@@ -163,10 +186,11 @@ export function UsbDeviceSetting() {
 
   useEffect(() => {
     syncUsbDeviceConfig();
-  }, [syncUsbDeviceConfig]);
+    syncUsbClassesLocked();
+  }, [syncUsbDeviceConfig, syncUsbClassesLocked]);
 
   return (
-    <Fieldset disabled={loading} className="space-y-4">
+    <Fieldset disabled={loading || usbClassesLocked} className="space-y-4">
       <div className="h-px w-full bg-slate-800/10 dark:bg-slate-300/20" />
 
       <SettingsSectionHeader
@@ -189,6 +213,10 @@ export function UsbDeviceSetting() {
           options={usbPresets}
         />
       </SettingsItem>
+
+      {usbClassesLocked && (
+        <p className="text-sm text-slate-600 dark:text-slate-400">{m.usb_device_locked_by_bmc()}</p>
+      )}
 
       {selectedPreset === "custom" && (
         <div className="ml-2 border-l border-slate-800/10 pl-4 dark:border-slate-300/20">

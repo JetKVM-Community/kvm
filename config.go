@@ -123,6 +123,57 @@ type Config struct {
 	NativeMaxRestart     uint                 `json:"native_max_restart_attempts"`
 	MqttConfig           *MQTTConfig          `json:"mqtt_config"`
 	AudioEnabled         bool                 `json:"audio_enabled"`
+
+	// BmcEnabled turns this device into a baseboard management controller for
+	// the attached host: it is what gates Redfish and IPMI, and it pins the USB
+	// gadget to the function set those protocols depend on.
+	//
+	// The pinning is the point. Out-of-band management is not a feature of the
+	// BMC alone -- it is a property of the USB link. Redfish reaches the host's
+	// firmware over CDC-ECM, virtual media over mass storage, and a serial
+	// console over CDC-ACM. Unticking one of those in the USB class editor would
+	// silently remove a management path that an operator is relying on, and the
+	// symptom would appear a boot later and somewhere else. So while this is on,
+	// the class selection is locked to the BMC set; turning it off unlocks it.
+	BmcEnabled bool `json:"bmc_enabled"`
+
+	// IPMI 2.0 over RMCP+ (see ipmi.go). Requires BmcEnabled. Off by default,
+	// and worth leaving off unless something actually needs it.
+	//
+	// IPMIPassword is stored in the clear, and cannot be anything else: RMCP+
+	// authenticates by having both ends compute an HMAC over the password
+	// itself (v2.0 RAKP), so the BMC needs the original bytes on every session
+	// open. It is a distinct credential from HashedPassword on purpose --
+	// enabling IPMI must not put the web UI's password on disk in plaintext.
+	//
+	// Note also that RAKP hands an HMAC of that password to anyone who asks for
+	// a session, without authenticating them first, which makes it offline
+	// crackable. That is a property of the protocol rather than of this
+	// implementation and cannot be fixed here; it is the reason the default is
+	// off and the reason to prefer a long random value.
+	IPMIEnabled  bool   `json:"ipmi_enabled"`
+	IPMIPort     int    `json:"ipmi_port"`
+	IPMIUsername string `json:"ipmi_username"`
+	IPMIPassword string `json:"ipmi_password"`
+
+	// A boot override staged for the managed host, over either Redfish or IPMI.
+	//
+	// This is the one piece of the host-facing state that is persisted, and the
+	// distinction is what it is rather than how much it matters. Everything else
+	// the host reports -- identity, BIOS attributes, boot options, memory,
+	// drives -- is an *observation* of the machine currently running, and a copy
+	// of it surviving a BMC restart would assert something the BMC no longer
+	// knows. An override is an *instruction*: an operator said "boot this next
+	// time", and the host has not read it yet. Dropping it on a restart loses
+	// the instruction silently, and the operator finds out by watching the wrong
+	// thing boot.
+	//
+	// IPMI makes this concrete. "ipmitool chassis bootdev pxe" is expected to
+	// survive a BMC reset -- v2.0 §28.13 gives boot parameter 3 a whole set of
+	// rules for when flags get cleared, which only makes sense for flags that
+	// otherwise persist.
+	HostBootOverrideTarget  string `json:"host_boot_override_target"`
+	HostBootOverrideEnabled string `json:"host_boot_override_enabled"`
 }
 
 // GetUpdateAPIURL returns the update API URL
@@ -154,7 +205,11 @@ func (c *Config) SetDisplayRotation(rotation string) error {
 	return nil
 }
 
-const configPath = "/userdata/kvm_config.json"
+// configPath is a var rather than a const so tests can redirect it. The device
+// test suite runs *on the device*, against the real filesystem: a test that
+// installs a fixture config and triggers a save would otherwise overwrite the
+// operator's real one -- password, cloud token and all.
+var configPath = "/userdata/kvm_config.json"
 
 // it's a temporary solution to avoid sharing the same pointer
 // we should migrate to a proper config solution in the future
@@ -199,18 +254,24 @@ var (
 
 func getDefaultConfig() Config {
 	return Config{
-		CloudURL:             DefaultAPIURL,
-		UpdateAPIURL:         DefaultAPIURL,
-		CloudAppURL:          "https://app.jetkvm.com",
-		AutoUpdateEnabled:    true, // Set a default value
-		ActiveExtension:      "",
-		KeyboardMacros:       []KeyboardMacro{},
-		DisplayRotation:      "270",
-		KeyboardLayout:       "en-US",
-		DisplayMaxBrightness: 64,
-		DisplayDimAfterSec:   120,  // 2 minutes
-		DisplayOffAfterSec:   1800, // 30 minutes
-		JigglerEnabled:       false,
+		CloudURL:          DefaultAPIURL,
+		UpdateAPIURL:      DefaultAPIURL,
+		CloudAppURL:       "https://app.jetkvm.com",
+		AutoUpdateEnabled: true, // Set a default value
+		ActiveExtension:   "",
+		IPMIEnabled:       false,
+		IPMIPort:          ipmiDefaultPort,
+		// No override staged. These mirror the Redfish vocabulary because that
+		// is what the host firmware reads; the IPMI side translates.
+		HostBootOverrideTarget:  "None",
+		HostBootOverrideEnabled: "Disabled",
+		KeyboardMacros:          []KeyboardMacro{},
+		DisplayRotation:         "270",
+		KeyboardLayout:          "en-US",
+		DisplayMaxBrightness:    64,
+		DisplayDimAfterSec:      120,  // 2 minutes
+		DisplayOffAfterSec:      1800, // 30 minutes
+		JigglerEnabled:          false,
 		// This is the "Standard" jiggler option in the UI
 		JigglerConfig: func() *JigglerConfig { c := defaultJigglerConfig; return &c }(),
 		TLSMode:       "",

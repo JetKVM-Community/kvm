@@ -403,6 +403,7 @@ func handleRedfishBiosPatch(c *gin.Context) {
 	}
 	count := len(redfishClient.BiosAttributes)
 	redfishClient.mu.Unlock()
+	bmcStateSave()
 
 	redfishLogger.Info().
 		Int("reported", len(patch.Attributes)).
@@ -458,6 +459,7 @@ func handleRedfishBiosSettingsPatch(c *gin.Context) {
 		redfishClient.BiosPending[key] = value
 	}
 	redfishClient.mu.Unlock()
+	bmcStateSave()
 
 	redfishLogger.Info().
 		Int("staged", len(patch.Attributes)).
@@ -477,6 +479,7 @@ func handleRedfishBiosReset(c *gin.Context) {
 	redfishClient.mu.Lock()
 	redfishClient.BiosPending = map[string]any{}
 	redfishClient.mu.Unlock()
+	bmcStateSave()
 
 	redfishLogger.Info().Msg("pending BIOS settings cleared by Bios.ResetBios")
 	c.Status(http.StatusNoContent)
@@ -540,6 +543,7 @@ func handleRedfishBiosRegistryPut(c *gin.Context) {
 	redfishClient.mu.Lock()
 	redfishClient.BiosRegistry = registry
 	redfishClient.mu.Unlock()
+	bmcStateSave()
 
 	redfishLogger.Info().
 		Int("entries", redfishCountRegistryAttributes(registry)).
@@ -615,6 +619,7 @@ func handleRedfishBootOptionCreate(c *gin.Context) {
 	redfishClient.BootOptions[id] = body
 	count := len(redfishClient.BootOptions)
 	redfishClient.mu.Unlock()
+	bmcStateSave()
 
 	redfishLogger.Info().
 		Str("id", id).
@@ -674,6 +679,7 @@ func handleRedfishBootOptionPatch(c *gin.Context) {
 	}
 	merged := redfishCopyMap(redfishClient.BootOptions[id])
 	redfishClient.mu.Unlock()
+	bmcStateSave()
 
 	redfishJSON(c, redfishBootOptionResource(id, merged))
 }
@@ -688,6 +694,7 @@ func handleRedfishBootOptionDelete(c *gin.Context) {
 	_, ok := redfishClient.BootOptions[id]
 	delete(redfishClient.BootOptions, id)
 	redfishClient.mu.Unlock()
+	bmcStateSave()
 
 	if !ok {
 		redfishError(c, http.StatusNotFound, "Boot option not found")
@@ -762,6 +769,7 @@ func handleRedfishMemoryCreate(c *gin.Context) {
 	redfishClient.Memory[id] = body
 	count := len(redfishClient.Memory)
 	redfishClient.mu.Unlock()
+	bmcStateSave()
 
 	redfishLogger.Info().Str("id", id).Int("total", count).Msg("host reported a memory module")
 
@@ -817,6 +825,7 @@ func handleRedfishMemoryModulePatch(c *gin.Context) {
 	}
 	merged := redfishCopyMap(redfishClient.Memory[id])
 	redfishClient.mu.Unlock()
+	bmcStateSave()
 
 	redfishJSON(c, redfishMemoryResource(id, merged))
 }
@@ -921,6 +930,7 @@ func handleRedfishDriveCreate(c *gin.Context) {
 	redfishClient.Drives[id] = body
 	count := len(redfishClient.Drives)
 	redfishClient.mu.Unlock()
+	bmcStateSave()
 
 	redfishLogger.Info().
 		Str("id", id).
@@ -980,6 +990,7 @@ func handleRedfishDrivePatch(c *gin.Context) {
 	}
 	merged := redfishCopyMap(redfishClient.Drives[id])
 	redfishClient.mu.Unlock()
+	bmcStateSave()
 
 	redfishJSON(c, redfishDriveResource(id, merged))
 }
@@ -1048,6 +1059,7 @@ func handleRedfishSecureBootPatch(c *gin.Context) {
 		redfishClient.SecureBoot[key] = value
 	}
 	redfishClient.mu.Unlock()
+	bmcStateSave()
 
 	redfishJSON(c, redfishSecureBootResource())
 }

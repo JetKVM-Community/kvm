@@ -134,9 +134,7 @@ func redfishTestRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
-	orig := config
-	t.Cleanup(func() { config = orig })
-	config.LocalAuthMode = "noPassword"
+	withTestConfig(t).LocalAuthMode = "noPassword"
 
 	r := gin.New()
 	v1 := r.Group("/redfish/v1")

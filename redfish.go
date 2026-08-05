@@ -65,6 +65,29 @@ func isRedfishHostInterfaceRequest(c *gin.Context) bool {
 // registerRedfishRoutes wires the Redfish endpoints onto the gin engine. The
 // unauthenticated protocol-version endpoint lives at /redfish; everything under
 // /redfish/v1 requires authentication (HTTP Basic, matching Redfish clients).
+
+// redfishBmcModeMiddleware turns the whole tree off unless this device is
+// configured to manage the attached host.
+//
+// 404 rather than 403, and per-request rather than by omitting the routes. With
+// the routes absent, gin's SPA catch-all answers /redfish/v1/ with index.html
+// and a 200 -- so a client would see a Redfish service returning HTML, which is
+// the failure mode that cost this stack a debugging session on the host side
+// ("Device Error" from a firmware that had been handed a web page). A 404 from
+// a route that exists says "no such resource here" and is the honest answer.
+func redfishBmcModeMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !bmcModeEnabled() {
+			redfishError(c, http.StatusNotFound,
+				"Board Management Controller mode is not enabled on this device")
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+// registerRedfishRoutes wires the Redfish endpoints onto the gin engine.
 func registerRedfishRoutes(r *gin.Engine) {
 	// Protocol version discovery (unauthenticated, per Redfish spec).
 	r.GET("/redfish", func(c *gin.Context) {
@@ -84,6 +107,10 @@ func registerRedfishRoutes(r *gin.Engine) {
 		Msg("Redfish service registered at /redfish/v1")
 
 	v1 := r.Group("/redfish/v1")
+	// Refuse before logging or authenticating: a request to a disabled service
+	// should not appear in the Redfish log as though it were served, and there
+	// is nothing to authenticate against.
+	v1.Use(redfishBmcModeMiddleware())
 	v1.Use(redfishRequestLogger())
 	v1.Use(redfishAuthMiddleware())
 	v1.Use(func(c *gin.Context) {
@@ -490,6 +517,64 @@ type redfishSystemPatch struct {
 // same silent no-op this list exists to prevent.
 var redfishBootOverrideTargets = []string{"None", "Pxe", "Hdd", "BiosSetup"}
 
+// redfishSetBootOverride stages a boot override and persists it.
+//
+// Both protocols write through here rather than touching redfishHost directly:
+// the override is the one piece of host state that outlives the process (see
+// Config.HostBootOverrideTarget), and a second writer that updated memory
+// without saving would produce an override that works until the BMC restarts
+// and then quietly stops -- the hardest version of this bug to notice.
+//
+// A save failure is logged rather than returned. The override is already in
+// effect for this boot, and refusing the operation because it might not survive
+// a restart that may never happen would be the worse trade.
+func redfishSetBootOverride(target, enabled string) {
+	redfishHostMu.Lock()
+	redfishHost.BootOverrideTarget = target
+	redfishHost.BootOverrideEnabled = enabled
+	redfishHostMu.Unlock()
+
+	config.HostBootOverrideTarget = target
+	config.HostBootOverrideEnabled = enabled
+	if err := SaveConfig(); err != nil {
+		redfishLogger.Warn().Err(err).
+			Str("target", target).
+			Str("enabled", enabled).
+			Msg("boot override staged but not persisted; it will be lost if the BMC restarts")
+	}
+}
+
+// redfishRestoreBootOverride reinstates a persisted override at startup. Called
+// after LoadConfig and before either protocol is reachable.
+func redfishRestoreBootOverride() {
+	target := config.HostBootOverrideTarget
+	enabled := config.HostBootOverrideEnabled
+
+	// An older config, or one hand-edited, may carry neither field.
+	if target == "" || enabled == "" {
+		return
+	}
+	// Refuse a target this firmware cannot apply rather than restoring
+	// something that would silently do nothing at the next boot.
+	if !redfishValidBootTarget(target) {
+		redfishLogger.Warn().Str("target", target).
+			Msg("persisted boot override is not a supported target; ignoring it")
+		return
+	}
+
+	redfishHostMu.Lock()
+	redfishHost.BootOverrideTarget = target
+	redfishHost.BootOverrideEnabled = enabled
+	redfishHostMu.Unlock()
+
+	if enabled != "Disabled" {
+		redfishLogger.Info().
+			Str("target", target).
+			Str("enabled", enabled).
+			Msg("restored a boot override staged before the last restart")
+	}
+}
+
 func redfishValidBootTarget(target string) bool {
 	for _, t := range redfishBootOverrideTargets {
 		if t == target {
@@ -552,12 +637,15 @@ func handleRedfishSystemPatch(c *gin.Context) {
 	if patch.BootProgress != nil && patch.BootProgress.LastState != nil {
 		redfishHost.BootProgress = *patch.BootProgress.LastState
 	}
+	bootChanged := false
 	if patch.Boot != nil {
 		if patch.Boot.BootSourceOverrideTarget != nil {
 			redfishHost.BootOverrideTarget = *patch.Boot.BootSourceOverrideTarget
+			bootChanged = true
 		}
 		if patch.Boot.BootSourceOverrideEnabled != nil {
 			redfishHost.BootOverrideEnabled = *patch.Boot.BootSourceOverrideEnabled
+			bootChanged = true
 		}
 	}
 	if fromHost {
@@ -565,6 +653,24 @@ func handleRedfishSystemPatch(c *gin.Context) {
 	}
 	snapshot := redfishHost
 	redfishHostMu.Unlock()
+
+	// Persist outside the lock. An override is an instruction the host has not
+	// read yet, so it has to outlive a BMC restart -- see
+	// Config.HostBootOverrideTarget. A save failure is logged rather than
+	// returned: the override is already in effect for this boot.
+	if bootChanged {
+		config.HostBootOverrideTarget = snapshot.BootOverrideTarget
+		config.HostBootOverrideEnabled = snapshot.BootOverrideEnabled
+		if err := SaveConfig(); err != nil {
+			redfishLogger.Warn().Err(err).
+				Msg("boot override staged but not persisted; it will be lost if the BMC restarts")
+		}
+	}
+
+	// The host's identity and boot progress are persisted too, so a query
+	// against a powered-off machine returns what it last reported rather than
+	// nothing.
+	bmcStateSave()
 
 	// This line is the acknowledgement of record: it is what proves the host's
 	// firmware reached the BMC and what it said. Logged at Info so it survives

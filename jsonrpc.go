@@ -1003,7 +1003,38 @@ func updateUsbRelatedConfig() error {
 	return nil
 }
 
+// Board Management Controller mode gates Redfish and IPMI and pins the USB
+// function set they depend on. See bmc.go.
+func rpcGetBmcEnabled() (bool, error) {
+	return config.BmcEnabled, nil
+}
+
+func rpcSetBmcEnabled(enabled bool) error {
+	if err := setBmcEnabled(enabled); err != nil {
+		return err
+	}
+	// Applying the pinned function set is a gadget reconfiguration, the same as
+	// any other USB class change.
+	if enabled {
+		gadget.SetGadgetDevices(effectiveUsbDevices())
+		return updateUsbRelatedConfig()
+	}
+	return nil
+}
+
+// rpcGetUsbDevicesLocked lets the UI disable the class editor and say why,
+// rather than offering controls whose writes will be refused.
+func rpcGetUsbDevicesLocked() (bool, error) {
+	return usbDevicesLocked(), nil
+}
+
 func rpcSetUsbDevices(usbDevices usbgadget.Devices) error {
+	// Refused rather than silently coerced back to the BMC set: an operator who
+	// unticks USB Ethernet is trying to do something, and quietly re-ticking it
+	// would leave them believing the opposite of what happened.
+	if usbDevicesLocked() {
+		return fmt.Errorf("USB classes are locked while Board Management Controller mode is enabled")
+	}
 	if !usbDevices.Audio {
 		config.AudioEnabled = false
 	}
@@ -1434,6 +1465,9 @@ var rpcHandlers = map[string]RPCHandler{
 	"setSerialCommandHistory":    {Func: rpcSetSerialCommandHistory, Params: []string{"commandHistory"}},
 	"deleteSerialCommandHistory": {Func: rpcDeleteSerialCommandHistory},
 	"setTerminalPaused":          {Func: rpcSetTerminalPaused, Params: []string{"terminalPaused"}},
+	"getBmcEnabled":              {Func: rpcGetBmcEnabled},
+	"setBmcEnabled":              {Func: rpcSetBmcEnabled, Params: []string{"enabled"}},
+	"getUsbDevicesLocked":        {Func: rpcGetUsbDevicesLocked},
 	"getUsbDevices":              {Func: rpcGetUsbDevices},
 	"setUsbDevices":              {Func: rpcSetUsbDevices, Params: []string{"devices"}},
 	"setUsbDeviceState":          {Func: rpcSetUsbDeviceState, Params: []string{"device", "enabled"}},

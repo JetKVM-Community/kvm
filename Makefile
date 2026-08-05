@@ -201,8 +201,12 @@ build_dev_test: build_test2json build_gotestsum
 
 	@cat resource/dev_test.sh > $(BIN_DIR)/tests/run_all_tests
 	@for test in $(TEST_DIRS); do \
-		test_pkg_name=$$(echo $$test | sed 's/^.\///g'); \
-		test_pkg_full_name=$(KVM_PKG_NAME)/$$(echo $$test | sed 's/^.\///g'); \
+		test_pkg_name=$$(echo $$test | sed 's/^\.\///g'); \
+		test_pkg_full_name=$(KVM_PKG_NAME)/$$test_pkg_name; \
+		if [ "$$test_pkg_name" = "." ]; then \
+			test_pkg_name=kvm; \
+			test_pkg_full_name=$(KVM_PKG_NAME); \
+		fi; \
 		test_filename=$$(echo $$test_pkg_name | sed 's/\//__/g')_test; \
 		$(GO_CMD) test -v \
 			-ldflags="$(GO_LDFLAGS) -X $(KVM_PKG_NAME).builtAppVersion=$(VERSION_DEV)" \

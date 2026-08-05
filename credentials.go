@@ -163,7 +163,29 @@ func setSharedPassword(plain string) error {
 
 	// A new password invalidates every cached verification.
 	bcryptCacheReset()
+
+	// IPMI reads the credential once, when it starts. Without this, setting the
+	// device password on a BMC whose IPMI had no credential yet leaves the
+	// listener down until the next reboot -- and enabling IPMI, then setting a
+	// password, is the obvious order to do it in.
+	if bmcModeEnabled() {
+		if err := ipmiRestart(); err != nil {
+			ipmiLogger.Error().Err(err).Msg("failed to restart IPMI after a password change")
+		}
+	}
+
 	return nil
+}
+
+// clearSharedPassword removes the password in both forms.
+//
+// Both, not just the bcrypt hash: leaving the sealed copy behind would let IPMI
+// keep authenticating a password the operator has just deleted, which is the
+// opposite of what "remove the password" means.
+func clearSharedPassword() {
+	config.HashedPassword = ""
+	config.EncryptedPassword = ""
+	bcryptCacheReset()
 }
 
 // sharedPasswordForIPMI returns the plaintext RAKP needs.

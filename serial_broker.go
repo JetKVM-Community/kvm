@@ -40,10 +40,24 @@ type serialSubscriber interface {
 	io.Writer
 }
 
+// subscription identifies one attached consumer.
+//
+// The set is keyed on this pointer rather than on the serialSubscriber itself
+// because a subscriber is an interface value, and Go panics at runtime when the
+// dynamic type behind it is not comparable:
+//
+//	panic: runtime error: hash of unhashable type kvm.serialFuncWriter
+//
+// A func adapter is the natural way to plug a WebRTC data channel in, and that
+// is exactly the shape that blows up. Keying on a pointer accepts any writer.
+type subscription struct {
+	w serialSubscriber
+}
+
 type serialBroker struct {
 	mu     sync.Mutex
 	file   *os.File
-	subs   map[serialSubscriber]struct{}
+	subs   map[*subscription]struct{}
 	closed chan struct{}
 
 	// scroll retains the tail of recent output for replay on attach.
@@ -62,7 +76,7 @@ func cdcSerial() *serialBroker {
 	defer cdcSerialBrokerMu.Unlock()
 
 	if cdcSerialBroker == nil {
-		cdcSerialBroker = &serialBroker{subs: map[serialSubscriber]struct{}{}}
+		cdcSerialBroker = &serialBroker{subs: map[*subscription]struct{}{}}
 	}
 	return cdcSerialBroker
 }
@@ -84,7 +98,8 @@ func (b *serialBroker) Subscribe(s serialSubscriber) (func(), error) {
 		go b.readLoop(f, b.closed)
 	}
 
-	b.subs[s] = struct{}{}
+	sub := &subscription{w: s}
+	b.subs[sub] = struct{}{}
 	replay := append([]byte(nil), b.scroll...)
 
 	// Outside the lock would be racier, not safer: a write arriving between the
@@ -94,14 +109,14 @@ func (b *serialBroker) Subscribe(s serialSubscriber) (func(), error) {
 		_, _ = s.Write(replay)
 	}
 
-	return func() { b.unsubscribe(s) }, nil
+	return func() { b.unsubscribe(sub) }, nil
 }
 
-func (b *serialBroker) unsubscribe(s serialSubscriber) {
+func (b *serialBroker) unsubscribe(sub *subscription) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	delete(b.subs, s)
+	delete(b.subs, sub)
 	if len(b.subs) > 0 || b.file == nil {
 		return
 	}
@@ -149,7 +164,7 @@ func (b *serialBroker) readLoop(f *os.File, done chan struct{}) {
 		if len(b.scroll) > serialScrollback {
 			b.scroll = b.scroll[len(b.scroll)-serialScrollback:]
 		}
-		subs := make([]serialSubscriber, 0, len(b.subs))
+		subs := make([]*subscription, 0, len(b.subs))
 		for s := range b.subs {
 			subs = append(subs, s)
 		}
@@ -158,7 +173,7 @@ func (b *serialBroker) readLoop(f *os.File, done chan struct{}) {
 		for _, s := range subs {
 			// One consumer's failure must not deprive the others of output, so
 			// errors are dropped here; consumers detect their own teardown.
-			_, _ = s.Write(buf[:n])
+			_, _ = s.w.Write(buf[:n])
 		}
 
 		select {

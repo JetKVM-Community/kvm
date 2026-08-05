@@ -32,7 +32,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 	"github.com/vearutop/statigz"
-	"golang.org/x/crypto/bcrypt"
 )
 
 //nolint:typecheck
@@ -581,8 +580,7 @@ func handleLogin(c *gin.Context) {
 		return
 	}
 
-	err := bcrypt.CompareHashAndPassword([]byte(config.HashedPassword), []byte(req.Password))
-	if err != nil {
+	if !verifyPassword(req.Password) {
 		passwordRateLimiter.RecordFailure(ip)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid password"})
 		return
@@ -667,8 +665,7 @@ func basicAuthProtectedMiddleware(requireDeveloperMode bool) gin.HandlerFunc {
 			return
 		}
 
-		err := bcrypt.CompareHashAndPassword([]byte(config.HashedPassword), []byte(password))
-		if err != nil {
+		if !verifyPassword(password) {
 			sendErrorJsonThenAbort(c, http.StatusUnauthorized, "Invalid password")
 			return
 		}
@@ -755,13 +752,11 @@ func handleCreatePassword(c *gin.Context) {
 		return
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil {
+	if err := setSharedPassword(req.Password); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
 		return
 	}
 
-	config.HashedPassword = string(hashedPassword)
 	config.LocalAuthToken = uuid.New().String()
 	config.LocalAuthMode = "password"
 	if err := SaveConfig(); err != nil {
@@ -805,18 +800,16 @@ func handleUpdatePassword(c *gin.Context) {
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(config.HashedPassword), []byte(req.OldPassword)); err != nil {
+	if !verifyPassword(req.OldPassword) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Incorrect old password"})
 		return
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
-	if err != nil {
+	if err := setSharedPassword(req.NewPassword); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash new password"})
 		return
 	}
 
-	config.HashedPassword = string(hashedPassword)
 	config.LocalAuthToken = uuid.New().String()
 	if err := SaveConfig(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save configuration"})
@@ -846,13 +839,13 @@ func handleDeletePassword(c *gin.Context) {
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(config.HashedPassword), []byte(req.Password)); err != nil {
+	if !verifyPassword(req.Password) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Incorrect password"})
 		return
 	}
 
 	// Disable password
-	config.HashedPassword = ""
+	clearSharedPassword()
 	config.LocalAuthToken = ""
 	config.LocalAuthMode = "noPassword"
 	if err := SaveConfig(); err != nil {
@@ -946,21 +939,18 @@ func handleSetup(c *gin.Context) {
 			return
 		}
 
-		// Hash the password
-		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-		if err != nil {
+		if err := setSharedPassword(req.Password); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
 			return
 		}
 
-		config.HashedPassword = string(hashedPassword)
 		config.LocalAuthToken = uuid.New().String()
 
 		// Set the cookie
 		c.SetCookie("authToken", config.LocalAuthToken, authTokenMaxAge, "/", "", false, true)
 	} else {
 		// For noPassword mode, ensure the password field is empty
-		config.HashedPassword = ""
+		clearSharedPassword()
 		config.LocalAuthToken = ""
 	}
 

@@ -243,10 +243,26 @@ func initUsbGadget() {
 	// address survives reboots (see internal/usbgadget/ethernet.go).
 	usbgadget.SetEthernetMACSeed(GetDeviceID())
 
+	usbConfig := config.UsbConfig
+	if usbConfig != nil && usbConfig.SerialNumber == "" {
+		// Give the gadget a USB serial number.
+		//
+		// Without one the host has no stable way to name this device. udev
+		// builds /dev/serial/by-id/ out of the manufacturer, product and serial
+		// strings, so an empty serial leaves every JetKVM sharing one path --
+		// and the raw /dev/ttyACM<N> is worse, since N is assigned in
+		// enumeration order and moves when any other CDC-ACM device is present.
+		//
+		// The device ID is the right value: it is already what the CDC-ECM MACs
+		// and the IPMI GUID are derived from, so the serial console, the Redfish
+		// host interface and the BMC's own identity all trace to the same unit.
+		usbConfig.SerialNumber = GetDeviceID()
+	}
+
 	gadget = usbgadget.NewUsbGadget(
 		"jetkvm",
 		effectiveUsbDevices(),
-		config.UsbConfig,
+		usbConfig,
 		usbLogger,
 	)
 

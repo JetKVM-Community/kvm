@@ -5,6 +5,7 @@ import { useDeviceUiNavigation } from "@hooks/useAppNavigation";
 import { useDeviceStore } from "@hooks/stores";
 import { Button } from "@components/Button";
 import Checkbox from "@components/Checkbox";
+import { ConfirmDialog } from "@components/ConfirmDialog";
 import { SelectMenuBasic } from "@components/SelectMenuBasic";
 import { SettingsItem } from "@components/SettingsItem";
 import { SettingsPageHeader } from "@components/SettingsPageheader";
@@ -40,6 +41,43 @@ export default function SettingsGeneralRoute() {
       }
       setAutoUpdate(enabled);
     });
+  };
+
+  const [bmcEnabled, setBmcEnabled] = useState(false);
+  const [showBmcConfirm, setShowBmcConfirm] = useState(false);
+
+  useEffect(() => {
+    send("getBmcEnabled", {}, (resp: JsonRpcResponse) => {
+      if ("error" in resp) return;
+      setBmcEnabled(resp.result as boolean);
+    });
+  }, [send]);
+
+  const applyBmcEnabled = (enabled: boolean) => {
+    send("setBmcEnabled", { enabled }, (resp: JsonRpcResponse) => {
+      if ("error" in resp) {
+        notifications.error(m.general_bmc_error({ error: resp.error.data || m.unknown_error() }));
+        return;
+      }
+      setBmcEnabled(enabled);
+    });
+  };
+
+  /*
+   * Turning BMC mode on re-composes the USB gadget (see bmcUsbDevices in
+   * bmc.go), which the managed host sees as a USB re-enumeration -- costly or
+   * fatal to a host that happens to be booting. So confirm before enabling.
+   *
+   * Turning it off is not gated: it deliberately leaves the USB function set
+   * alone, so nothing is yanked out from under the host, and requiring a
+   * confirmation to *stop* managing would be the surprising reading.
+   */
+  const handleBmcChange = (enabled: boolean) => {
+    if (enabled) {
+      setShowBmcConfirm(true);
+      return;
+    }
+    applyBmcEnabled(false);
   };
 
   const [currentLocale, setCurrentLocale] = useState(getLocale());
@@ -136,6 +174,16 @@ export default function SettingsGeneralRoute() {
               />
             </SettingsItem>
           </div>
+          <div className="space-y-4">
+            <SettingsItem title={m.general_bmc_title()} description={m.general_bmc_description()}>
+              <Checkbox
+                checked={bmcEnabled}
+                onChange={e => {
+                  handleBmcChange(e.target.checked);
+                }}
+              />
+            </SettingsItem>
+          </div>
           <div className="mt-2 flex items-center justify-between gap-x-2">
             <SettingsItem
               title={m.general_reboot_device()}
@@ -152,6 +200,19 @@ export default function SettingsGeneralRoute() {
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={showBmcConfirm}
+        title={m.general_bmc_confirm_title()}
+        description={m.general_bmc_confirm_description()}
+        variant="warning"
+        confirmText={m.general_bmc_confirm_button()}
+        onConfirm={() => {
+          setShowBmcConfirm(false);
+          applyBmcEnabled(true);
+        }}
+        onClose={() => setShowBmcConfirm(false)}
+      />
     </div>
   );
 }
